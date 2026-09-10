@@ -6,6 +6,63 @@ actually live right now, use `mcp__Supabase__list_edge_functions` (or the Supaba
 dashboard) directly; this file records what was last *deployed through a recorded
 mechanism*, which may lag a manual/ad-hoc deploy done another way.
 
+## R3 SerpAPI identification deploy — 2026-09-10
+
+`claude-proxy` was deployed via the **Supabase CLI** (`npx supabase functions
+deploy claude-proxy --project-ref dqgfpchkheznvanfgsmx`), run by the product
+owner locally — same mechanism as R2, required again because the dependency
+closure has grown to 42 files (`claude-proxy/` + `_shared/`), still too large
+for `mcp__Supabase__deploy_edge_function`. This shipped `main` HEAD
+(`c71f4d1`, PR #156 merged — R3 "fix the filters": T1-T3/L/M resolved,
+SerpAPI-first identification via `serpApiIdentification.ts`, Reverb
+price-guide evidence via `reverbEvidence.ts`), plus migration
+`20260831180000_r3_scan_temp_images_bucket.sql` (private `scan-temp-images`
+storage bucket, service-role-only — the object `identifyViaSerpApi` uploads
+to for the duration of one SerpAPI Google Lens call, then deletes).
+
+**First attempt incomplete — caught and corrected within this session.** An
+initial deploy (v102 → v106, 2026-09-10T13:39:47Z) ran from a local checkout
+that was not actually up to date with `main` — the product owner had two
+separate clones on disk (one nested inside the other), and the outer one
+carried stray uncommitted edits to `claude-proxy/index.ts` and others. That
+deploy's live bundle was missing `_shared/serpApiIdentification.ts` and every
+SerpAPI code path entirely (0 occurrences of `identifyViaSerpApi`/
+`mergeSerpApiIdentity` in the fetched bundle), even though `Reverb`/
+`parseModelToken` from the same commit were present — confirmed via
+`mcp__Supabase__get_edge_function` + grep against the actual bundle content,
+not assumed from the version bump alone. Flagged before treating the task as
+done; not used as a basis for any production claim.
+
+**Result (corrected deploy):** `claude-proxy` **v106 → v109** (v107/v108
+likely interstitial CLI upload steps, same unexplained-but-harmless pattern
+noted in the R2 entry below — not investigated further), `status: ACTIVE`,
+`verify_jwt: false` (unchanged). Deployed 2026-09-10T13:57:42Z from the
+product owner's clean, up-to-date clone — confirmed via `git log
+HEAD..origin/main` (empty) and `git diff` on `claude-proxy/index.ts` (empty)
+immediately before this deploy.
+
+Post-deploy verification (fetched the live bundle via
+`mcp__Supabase__get_edge_function`, grepped it): `_shared/serpApiIdentification.ts`
+present in the file list, `identifyViaSerpApi` (3 occurrences),
+`mergeSerpApiIdentity` (2), a `scan-temp-images` bucket reference (1),
+`_shared/reverbEvidence.ts` also present. `SERP_API_KEY` — the env var name
+`serpApiIdentification.ts` actually reads, not `SERPAPI_API_KEY` — confirmed
+present in `npx supabase secrets list` by the product owner.
+
+Migration verified applied via `mcp__Supabase__execute_sql`: the
+`storage.buckets` row for `scan-temp-images` — `public=false`,
+`file_size_limit=10485760`,
+`allowed_mime_types=[image/jpeg,image/png,image/gif,image/webp]` — matches
+the migration exactly, and `20260831180000` appears in
+`mcp__Supabase__list_migrations`.
+
+**Not yet done:** an authenticated production scan that actually exercises
+the SerpAPI identification path end-to-end (a real photo, a real Google Lens
+call, confirming `mergeSerpApiIdentity` changes the resulting identity) —
+this deploy validates that the code and bucket are live and structurally
+correct, not that the SerpAPI integration behaves correctly against a real
+image and a real API response.
+
 ## R2 deploy — 2026-08-31
 
 `claude-proxy` was deployed via the **Supabase CLI** (`npx supabase functions deploy

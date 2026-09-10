@@ -4,6 +4,72 @@ This file is the persistent session context. Update it at the end of every Claud
 
 ---
 
+## Session: 2026-09-10 — R3 `claude-proxy` deployed to production, scan-temp-images migration applied
+
+PR #156 (R3 — SerpAPI-first identification, Reverb evidence, T1-T3/L/M) had
+already merged to `main`. This session's task was purely operational: deploy
+`claude-proxy` via the Supabase CLI (the MCP tool can't handle the
+dependency closure — now 42 files) and apply the `scan-temp-images` storage
+migration that R3's SerpAPI code depends on. No code was written this
+session.
+
+**Migration — applied cleanly, first try.** `20260831180000_r3_scan_temp_images_bucket.sql`
+via the product owner's local `npx supabase db push`. Verified via
+`mcp__Supabase__execute_sql`: `scan-temp-images` bucket exists,
+`public=false`, `file_size_limit=10485760`, correct mime types. Also
+confirmed in `mcp__Supabase__list_migrations`.
+
+**Function deploy — took two attempts.** The product owner has two separate
+local clones of this repo on disk (`C:\...\scanforprofit\` and a nested
+`C:\...\scanforprofit\scanforprofit\`), and initially deployed from the
+outer one, which was not actually current with `main` and carried
+uncommitted local edits to `claude-proxy/index.ts`. That deploy (v102→v106)
+went live and reported `ACTIVE`, but the live bundle — checked by fetching
+it via `mcp__Supabase__get_edge_function` and grepping the actual content,
+not inferred from the version bump — was missing `_shared/serpApiIdentification.ts`
+and every SerpAPI code path entirely, while other R3 code from the same
+commit (Reverb, identity validation) was present. This was caught before
+being reported as done. Redeployed from the inner, clean clone (confirmed
+`git log HEAD..origin/main` empty and `git diff` on the file empty
+immediately beforehand): v106→v109, and this time `identifyViaSerpApi`/
+`mergeSerpApiIdentity`/`serpApiIdentification.ts` all confirmed present in
+the live bundle. `SERP_API_KEY` secret (the actual env var name the code
+reads — not `SERPAPI_API_KEY`) confirmed set via `npx supabase secrets list`.
+Full detail: `supabase/DEPLOYED.md`'s "R3 SerpAPI identification deploy —
+2026-09-10" entry.
+
+**Files changed:** `supabase/DEPLOYED.md`, this file. No application code
+touched.
+
+**Assumptions made:** None beyond what's documented above (each verification
+step was checked against the live bundle/database, not assumed from a
+success message).
+
+**Out-of-scope finding:** the product owner's outer local clone
+(`C:\Users\bbake\Projects\scanforprofit\`) has uncommitted modifications to
+`claude-proxy/index.ts`, `app.html`, `ebay-oauth/index.ts`,
+`stripe-checkout/index.ts`, `stripe-webhook/index.ts`, plus untracked files
+including what look like unrelated personal/project directories (`ChatGPT/`,
+`Ebay Sample Files/`, `ViMax/`, `ccpm/`, `docs/n8n/`, `graphify-out/`) and an
+untracked migration (`20260826000000_p1_idempotency_and_stripe_events.sql`,
+which doesn't match anything in the actual applied-migrations list). Not
+touched or investigated further this session — flagged so a future session
+doesn't accidentally deploy from that clone again, and so the product owner
+can decide what (if anything) in those uncommitted edits is real
+in-progress work worth recovering versus stale/abandoned.
+
+**Next task:** run an authenticated production scan that actually exercises
+the SerpAPI identification path (real photo → real Google Lens call →
+confirm `mergeSerpApiIdentity` changes the resulting identity) — this
+session confirmed the code and bucket are live and structurally correct, not
+that the integration behaves correctly end-to-end. Separately, the product
+owner should resolve the two-local-clone situation above before the next
+deploy.
+
+**Blockers:** None.
+
+---
+
 ## Session: 2026-08-31 (part 4) — R3 implemented, PR open (not yet deployed)
 
 R3 ("Stop discarding good evidence") was blocked on five open product decisions
