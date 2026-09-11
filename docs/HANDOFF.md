@@ -4,6 +4,51 @@ This file is the persistent session context. Update it at the end of every Claud
 
 ---
 
+## Session: 2026-09-11 — Fix comp-matching regression (PR #158)
+
+**Root cause confirmed:** `compSelection.ts` and `queryPlanner.ts` both derived
+the "head noun" by taking the last token of `productFamily()`. For the production
+identity "General Electric All Transistor AM Radio Vintage 1960s Table Top",
+this resolved to `"top"` instead of `"radio"`. All 158 comps from two successful
+queries scored `brand +25 = 25`, below the 60pt usable floor — hence 0 retained
+comps and the scanner fell through to a later throttle as its terminal reason.
+
+**Fix:** Added `extractProductType(identity): string | null` to `compSelection.ts`
+(exported). Scans `productFamily()` tokens right-to-left, skipping trailing
+form-factor tokens (`table`, `top`, `desktop`, `portable`...), color tokens,
+size/style tokens, and year/decade tokens (`/^\d{4}s?$/`). First non-descriptor
+token is the product noun. Returns `null` when all tokens are descriptors.
+
+Both `scoreComp()` and `queryPlanner.ts` rung 5/6 now use this single helper.
+The private duplicate `headNoun()` function in `queryPlanner.ts` removed.
+
+**Scoring:** No thresholds or weights changed.
+**Rate limiting:** No rate-limit or cascade code changed.
+
+**Files changed:**
+- `supabase/functions/_shared/compSelection.ts` — extractProductType added/used
+- `supabase/functions/_shared/queryPlanner.ts` — imports extractProductType, removes headNoun()
+- `supabase/functions/_shared/compSelection_test.ts` — 3 regression tests
+- `supabase/functions/_shared/queryPlanner_test.ts` — 1 regression test
+- `docs/HANDOFF.md` — this update
+
+**Test results:** 308/308 passed. `tsc --noEmit`: 0 errors.
+
+**Commit:** b6b2b58 on branch `claude/new-session-053ooq`. PR #158 open as draft.
+
+**Next task:** Deploy `claude-proxy` via Supabase CLI from the inner clean clone,
+then replay a production scan of the GE radio and inspect `scan_log.raw_response.decisionAudit`
+to verify retained comp counts. Report Case A/B/C per the executive directive.
+If Case A (≥3 retained comps on an early rung), no further changes needed.
+
+**Assumptions made:** None material — fix verified against the literal production input string.
+
+**Out-of-scope findings:** None this session.
+
+**Blockers:** None.
+
+---
+
 ## Session: 2026-09-10 — R3 `claude-proxy` deployed to production, scan-temp-images migration applied
 
 PR #156 (R3 — SerpAPI-first identification, Reverb evidence, T1-T3/L/M) had
