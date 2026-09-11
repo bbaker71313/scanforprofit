@@ -266,7 +266,7 @@ export async function resolveVerifiedMarketData(identity: IdentityCandidate): Pr
     if (!soldProvider) {
       return {
         ok: false, reason: 'SOLDCOMPS_NOT_CONFIGURED',
-        detail: 'No sold-comp provider is configured (SOLD_COMPS_API_KEY/TRAWL_API_KEY absent) — active-market-only evidence did not reach a decisive tier.',
+        detail: 'No sold-comp provider is configured (SERP_API_KEY/SOLD_COMPS_API_KEY absent) — active-market-only evidence did not reach a decisive tier.',
         audit: { attemptedQueries, selectedQuery: selected?.query ?? null, activeSample },
       };
     }

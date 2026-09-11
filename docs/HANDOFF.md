@@ -4,6 +4,28 @@ This file is the persistent session context. Update it at the end of every Claud
 
 ---
 
+## Session: 2026-09-11 — SerpAPI replaces Trawl as primary eBay sold-history provider
+
+**Summary:** Replaced Trawl with SerpAPI (`engine=ebay&show_only=Sold`) as the primary eBay sold-data provider per executive directive. `SERP_API_KEY` (already configured in Supabase for Google Lens identification) is now reused for sold searches — no new credential needed.
+
+**Provider priority after this session:** `SERP_API_KEY` → `SOLD_COMPS_API_KEY` → null. `TRAWL_API_KEY` is deprecated and no longer in the selection path.
+
+**Files changed:**
+- `supabase/functions/_shared/serpApiEbaySoldProvider.ts` — NEW. `SerpApiEbaySoldProvider` class + `parseSerpApiSoldItem()` parser (exported for tests). Uses `externalCall` with 12s timeout, 1 retry, Retry-After-aware `shouldRetry`.
+- `supabase/functions/_shared/serpApiEbaySoldProvider_test.ts` — NEW. 28 tests covering parser variants, transport error cases, and GE radio regression.
+- `supabase/functions/_shared/soldCompsProvider.ts` — Added `import { SerpApiEbaySoldProvider }`. Exported `TrawlProvider` class (deprecated, kept for rollback). Updated `getSoldMarketDataProvider()` factory: SerpAPI → SoldComps → null. Replaced `TRAWL_API_KEY_ENV_NAME` with `SERP_API_KEY_ENV_NAME`.
+- `supabase/functions/_shared/soldCompsProvider_test.ts` — Added `TrawlProvider` import. Updated `trawlProvider()` helper to construct directly (no longer uses factory). Overhauled `withEnv` to support clearing keys. Added 4 factory selection tests.
+- `supabase/functions/_shared/marketDataPipeline.ts` — Updated `SOLDCOMPS_NOT_CONFIGURED` error detail string (TRAWL_API_KEY → SERP_API_KEY).
+- `docs/files/DECISIONS.md` — Replaced "Trawl is the preferred sold-history provider" with "SerpAPI is the primary eBay sold-history provider" (decision date 2026-09-11).
+
+**Tests:** 52/52 pass (28 new SerpAPI provider tests + all 24 existing soldCompsProvider tests).
+
+**Next task:** Deploy the updated `claude-proxy` / `_shared` Edge Functions to Supabase production so the live scanner uses SerpAPI. Then run a production replay: scan 1 item and confirm the scan log shows a `serpapi.com/ebay` provider in the evidence audit. No code changes needed — the key is already in Supabase secrets.
+
+**Decision preserved:** `SERP_API_KEY` must never be exposed client-side. All SerpAPI calls go through Edge Functions only.
+
+---
+
 ## Session: 2026-09-11 — Fix comp-matching regression (PR #158)
 
 **Root cause confirmed:** `compSelection.ts` and `queryPlanner.ts` both derived

@@ -130,10 +130,10 @@ A provider outage, authentication failure, quota exhaustion, throttling, or othe
 **Why:** The product owner's R3 update explicitly listed Reverb (not the other federation providers) as an R3-relevant evidence source and confirmed its credential is already configured. `SFP_R3_REMEDIATION_PLAN_UPDATE_20260831.md`'s own provider-generic-matching requirement means this adapter reuses the same scored matcher and capability contract R5's other adapters will use later — no scorer rewrite needed when R5 lands the rest.
 **Do not** treat this as R5 having started — Etsy/Discogs/Amazon/Mercari/Poshmark are still explicit `NOT_CONFIGURED` placeholders, and R5's §8.1 class-ceiling table, call-budget layer, and rollout sequencing still apply in full once that release starts.
 
-### Trawl is the preferred sold-history provider
-**Decision (approved 2026-08-29):** When `TRAWL_API_KEY` is configured, the verified market-data pipeline uses Trawl's eBay sold-listings endpoint for the approved 90-day evidence window. The existing `SOLD_COMPS_API_KEY` integration remains a configuration fallback only when Trawl is not configured. A Trawl request failure does not silently switch providers mid-scan.
-**Why:** The product owner supplied the Trawl credential and explicitly authorized wiring it into the profit scanner. Keeping provider selection behind `SoldMarketDataProvider` preserves the existing deterministic comp qualification and HOT/LIST/SKIP authority path.
-**Do not:** expose the key client-side, call Trawl from `app.html`, use results outside the existing comp-matching pipeline, or convert provider errors into a sourcing decision.
+### SerpAPI is the primary eBay sold-history provider
+**Decision (approved 2026-09-11):** When `SERP_API_KEY` is configured, the verified market-data pipeline uses SerpAPI's eBay sold endpoint (`engine=ebay&show_only=Sold`) as the primary sold-history source. `SOLD_COMPS_API_KEY` remains a fallback. Trawl (`TRAWL_API_KEY`) is deprecated and removed from the default selection path — `TrawlProvider` is retained in code for rollback only.
+**Why:** `SERP_API_KEY` is already configured in Supabase secrets for visual identification (Google Lens). Reusing it for sold searches eliminates the separate Trawl credential dependency and removes Trawl's pacing/throttle overhead from the scan path. `show_only=Sold` returns only verified completed sales (not unsold completed listings). A `sold_date`-absent result is still admitted — the sold filter guarantees the item sold; the exact date is display-only. A SerpAPI request failure does not silently switch providers mid-scan.
+**Do not:** expose `SERP_API_KEY` client-side, call SerpAPI from `app.html`, use results outside the existing comp-matching pipeline, treat `show_only=Complete` results as sold evidence, or convert provider errors into a sourcing decision.
 
 ---
 
