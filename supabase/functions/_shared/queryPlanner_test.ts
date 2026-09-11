@@ -118,3 +118,25 @@ Deno.test("planMarketEvidenceQueries: with no identity signal at all, returns no
   const queries = planMarketEvidenceQueries(BASE_IDENTITY, ALL_TERMS_CAPS);
   assertEquals(queries, []);
 });
+
+Deno.test("planMarketEvidenceQueries: production GE-radio identity — cascade rungs contain 'radio' and never 'top'", () => {
+  // Real scan: "General Electric All Transistor AM Radio Vintage 1960s Table Top"
+  // with no validated model and no normalizedSearchTerms. The cascade falls
+  // through to rungs 5-6. The old last-token heuristic yielded "top" as the
+  // head noun; the fix must yield "radio".
+  const identity: IdentityCandidate = {
+    ...BASE_IDENTITY,
+    itemName: 'General Electric All Transistor AM Radio Vintage 1960s Table Top',
+    brand: 'General Electric',
+    normalizedSearchTerms: [],
+  };
+  const queries = planMarketEvidenceQueries(identity, ALL_TERMS_CAPS);
+  assert(
+    queries.every((q) => !q.query.split(' ').includes('top')),
+    `no rung should contain the token "top": ${JSON.stringify(queries)}`,
+  );
+  assert(
+    queries.some((q) => q.query.split(' ').includes('radio')),
+    `expected at least one rung containing the token "radio", got ${JSON.stringify(queries)}`,
+  );
+});

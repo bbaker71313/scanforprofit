@@ -4,6 +4,73 @@ This file is the persistent session context. Update it at the end of every Claud
 
 ---
 
+## Session: 2026-09-11 — SerpAPI replaces Trawl as primary eBay sold-history provider
+
+**Summary:** Replaced Trawl with SerpAPI (`engine=ebay&show_only=Sold`) as the primary eBay sold-data provider per executive directive. `SERP_API_KEY` (already configured in Supabase for Google Lens identification) is now reused for sold searches — no new credential needed.
+
+**Provider priority after this session:** `SERP_API_KEY` → `SOLD_COMPS_API_KEY` → null. `TRAWL_API_KEY` is deprecated and no longer in the selection path.
+
+**Files changed:**
+- `supabase/functions/_shared/serpApiEbaySoldProvider.ts` — NEW. `SerpApiEbaySoldProvider` class + `parseSerpApiSoldItem()` parser (exported for tests). Uses `externalCall` with 12s timeout, 1 retry, Retry-After-aware `shouldRetry`.
+- `supabase/functions/_shared/serpApiEbaySoldProvider_test.ts` — NEW. 28 tests covering parser variants, transport error cases, and GE radio regression.
+- `supabase/functions/_shared/soldCompsProvider.ts` — Added `import { SerpApiEbaySoldProvider }`. Exported `TrawlProvider` class (deprecated, kept for rollback). Updated `getSoldMarketDataProvider()` factory: SerpAPI → SoldComps → null. Replaced `TRAWL_API_KEY_ENV_NAME` with `SERP_API_KEY_ENV_NAME`.
+- `supabase/functions/_shared/soldCompsProvider_test.ts` — Added `TrawlProvider` import. Updated `trawlProvider()` helper to construct directly (no longer uses factory). Overhauled `withEnv` to support clearing keys. Added 4 factory selection tests.
+- `supabase/functions/_shared/marketDataPipeline.ts` — Updated `SOLDCOMPS_NOT_CONFIGURED` error detail string (TRAWL_API_KEY → SERP_API_KEY).
+- `docs/files/DECISIONS.md` — Replaced "Trawl is the preferred sold-history provider" with "SerpAPI is the primary eBay sold-history provider" (decision date 2026-09-11).
+
+**Tests:** 52/52 pass (28 new SerpAPI provider tests + all 24 existing soldCompsProvider tests).
+
+**Next task:** Deploy the updated `claude-proxy` / `_shared` Edge Functions to Supabase production so the live scanner uses SerpAPI. Then run a production replay: scan 1 item and confirm the scan log shows a `serpapi.com/ebay` provider in the evidence audit. No code changes needed — the key is already in Supabase secrets.
+
+**Decision preserved:** `SERP_API_KEY` must never be exposed client-side. All SerpAPI calls go through Edge Functions only.
+
+---
+
+## Session: 2026-09-11 — Fix comp-matching regression (PR #158)
+
+**Root cause confirmed:** `compSelection.ts` and `queryPlanner.ts` both derived
+the "head noun" by taking the last token of `productFamily()`. For the production
+identity "General Electric All Transistor AM Radio Vintage 1960s Table Top",
+this resolved to `"top"` instead of `"radio"`. All 158 comps from two successful
+queries scored `brand +25 = 25`, below the 60pt usable floor — hence 0 retained
+comps and the scanner fell through to a later throttle as its terminal reason.
+
+**Fix:** Added `extractProductType(identity): string | null` to `compSelection.ts`
+(exported). Scans `productFamily()` tokens right-to-left, skipping trailing
+form-factor tokens (`table`, `top`, `desktop`, `portable`...), color tokens,
+size/style tokens, and year/decade tokens (`/^\d{4}s?$/`). First non-descriptor
+token is the product noun. Returns `null` when all tokens are descriptors.
+
+Both `scoreComp()` and `queryPlanner.ts` rung 5/6 now use this single helper.
+The private duplicate `headNoun()` function in `queryPlanner.ts` removed.
+
+**Scoring:** No thresholds or weights changed.
+**Rate limiting:** No rate-limit or cascade code changed.
+
+**Files changed:**
+- `supabase/functions/_shared/compSelection.ts` — extractProductType added/used
+- `supabase/functions/_shared/queryPlanner.ts` — imports extractProductType, removes headNoun()
+- `supabase/functions/_shared/compSelection_test.ts` — 3 regression tests
+- `supabase/functions/_shared/queryPlanner_test.ts` — 1 regression test
+- `docs/HANDOFF.md` — this update
+
+**Test results:** 308/308 passed. `tsc --noEmit`: 0 errors.
+
+**Commit:** b6b2b58 on branch `claude/new-session-053ooq`. PR #158 open as draft.
+
+**Next task:** Deploy `claude-proxy` via Supabase CLI from the inner clean clone,
+then replay a production scan of the GE radio and inspect `scan_log.raw_response.decisionAudit`
+to verify retained comp counts. Report Case A/B/C per the executive directive.
+If Case A (≥3 retained comps on an early rung), no further changes needed.
+
+**Assumptions made:** None material — fix verified against the literal production input string.
+
+**Out-of-scope findings:** None this session.
+
+**Blockers:** None.
+
+---
+
 ## Session: 2026-09-10 — R3 `claude-proxy` deployed to production, scan-temp-images migration applied
 
 PR #156 (R3 — SerpAPI-first identification, Reverb evidence, T1-T3/L/M) had

@@ -1,5 +1,6 @@
 import {
   isCoherentPriceSet, rejectOutliers, scoreComp, selectComparableSoldComps,
+  extractProductType,
 } from "./compSelection.ts";
 import type { QueryCandidate } from "./compSelection.ts";
 import type { IdentityCandidate, SoldCompListing } from "./marketData.ts";
@@ -172,4 +173,68 @@ Deno.test('rejectOutliers: fails (no rescue) when fewer than 3 would survive', (
   const result = rejectOutliers(comps);
   // Dropping the one outlier leaves exactly 2 survivors — below the >=3 floor.
   if (result.dropped.length > 0) assertTrue(result.failed, 'expected failed:true when survivors drop below 3');
+});
+
+// ─── Production regression: GE All Transistor AM Radio ────────────────────
+// Real scan: first query returned 20 comps, second 138 comps, 0 survived
+// scoring. Root cause: productFamily() produced trailing "table top" tokens
+// and the old last-token heuristic selected "top" as the head noun instead
+// of "radio". No comp title contains "top" as a product-type signal, so
+// every comp scored below 60 (brand +25 only) and was rejected.
+// Fix: extractProductType() strips trailing form-factor/era tokens right-to-
+// left to reach the meaningful product noun.
+const GE_RADIO_PRODUCTION_IDENTITY: IdentityCandidate = {
+  itemName: 'General Electric All Transistor AM Radio Vintage 1960s Table Top',
+  brand: 'General Electric',
+  model: null, variant: null,
+  gtin: null, gtinKind: null, manufacturerPartNumber: null, modelFamilyHint: null,
+  likelyEbayCategory: 'Vintage AM Radios', categoryHints: ['Vintage AM Radios'],
+  conditionHints: 'Used', unresolvedAttributes: [], identityConfidence: 75,
+  evidenceUsed: ['visual_ai'], normalizedSearchTerms: [], providerId: 'test',
+};
+
+Deno.test('extractProductType: strips trailing "1960s Table Top" to reach "radio" for the production identity', () => {
+  const result = extractProductType(GE_RADIO_PRODUCTION_IDENTITY);
+  assertEquals(result, 'radio');
+});
+
+Deno.test('GE radio regression: a legitimate sold comp reaches usable band and carries the head-noun signal', () => {
+  // This comp mirrors a real sold listing shape. With the buggy "top" head
+  // noun it would score brand+25 only (total 25 < 60 → reject). With "radio"
+  // it should score brand+25, head noun+15, descriptive tokens (transistor,
+  // all) +20 = 60 — exactly the usable floor.
+  const result = scoreComp(
+    comp('r1', 'Vintage General Electric GE P-808A All Transistor AM Radio White Working', 45),
+    GE_RADIO_PRODUCTION_IDENTITY,
+    { query: 'general electric transistor radio', precision: 'product_family' },
+  );
+  assertTrue(result.band !== 'reject', `expected usable/exact band, got ${JSON.stringify(result)}`);
+  assertTrue(result.signals.includes('head noun +15'), `expected head-noun signal for "radio", got ${JSON.stringify(result.signals)}`);
+  assertTrue(result.score >= 60, `expected score >=60 (brand+head noun+descriptive), got ${result.score}`);
+});
+
+Deno.test('GE radio regression: unrelated GE products are rejected — brand alone is insufficient', () => {
+  // Brand (+25) alone never reaches the 60-point usable floor. These three
+  // products share the GE brand but not the product type — all must be
+  // rejected after the fix (not merely because of "top" being absent, but
+  // because "radio" is also absent).
+  const candidate = { query: 'general electric radio', precision: 'product_family' as const };
+
+  const iron = scoreComp(
+    comp('r2', 'General Electric Steam Iron Auto Shut Off', 18),
+    GE_RADIO_PRODUCTION_IDENTITY, candidate,
+  );
+  assertEquals(iron.band, 'reject');
+
+  const percolator = scoreComp(
+    comp('r3', 'General Electric Coffee Percolator Chrome Vintage', 35),
+    GE_RADIO_PRODUCTION_IDENTITY, candidate,
+  );
+  assertEquals(percolator.band, 'reject');
+
+  const cassette = scoreComp(
+    comp('r4', 'General Electric Cassette Player Recorder Model 3-5252', 22),
+    GE_RADIO_PRODUCTION_IDENTITY, candidate,
+  );
+  assertEquals(cassette.band, 'reject');
 });

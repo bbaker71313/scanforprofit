@@ -8,24 +8,13 @@
 // prose-query defect this release fixes.
 import type { IdentityCandidate } from "./marketData.ts"
 import type { QueryCandidate } from "./compSelection.ts"
-import { productFamily } from "./compSelection.ts"
+import { productFamily, extractProductType } from "./compSelection.ts"
 import type { MarketEvidenceProviderCapabilities } from "./marketplaceTypes.ts"
 
 function normalize(value: string | null | undefined): string {
   return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 }
 
-// English noun phrases put the head last ("AM Table Radio" -> "radio"), but
-// the most discriminative modifier is not always adjacent to it ("transistor"
-// beats "table" against real GE-radio comps: 6/9 vs 1/9). This heuristic is
-// deliberately not the primary signal for that reason — rung 4 (the AI's own
-// search_keywords, already tuned for exactly this) is tried first. This is
-// only the last-resort tail of the cascade (rungs 5-6), calibrated against
-// §3.1's corpus once it exists, not frozen.
-function headNoun(identity: IdentityCandidate): string {
-  const tokens = productFamily(identity).split(' ').filter(Boolean)
-  return tokens.length ? tokens[tokens.length - 1] : ''
-}
 
 function truncateTerms(text: string, maxTerms: number): string {
   const tokens = normalize(text).split(' ').filter(Boolean)
@@ -58,7 +47,7 @@ function planTermMatchedQueries(identity: IdentityCandidate, maxTerms: number): 
   const model = normalize(identity.model)
   const variant = normalize(identity.variant)
   const familyHint = normalize(identity.modelFamilyHint)
-  const noun = headNoun(identity)
+  const noun = extractProductType(identity) ?? ''
 
   const rungs: QueryCandidate[] = []
 

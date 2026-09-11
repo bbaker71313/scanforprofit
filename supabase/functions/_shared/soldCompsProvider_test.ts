@@ -3,7 +3,7 @@
 // Fixture below is the real (sanitized) shape confirmed live 2026-08-26 —
 // see soldCompsProvider.ts file header for how it was obtained.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { parseSoldComp, parseTrawlSoldComp, getSoldMarketDataProvider } from "./soldCompsProvider.ts";
+import { parseSoldComp, parseTrawlSoldComp, getSoldMarketDataProvider, TrawlProvider } from "./soldCompsProvider.ts";
 import { __resetForTests as __resetRateLimitForTests } from "./providerRateLimit.ts";
 
 const LIVE_RECORD = {
@@ -137,20 +137,30 @@ Deno.test("Trawl malformed or zero-price records are rejected", () => {
 // injecting a fetchImpl, since TrawlProvider (like searchActiveListings)
 // resolves the global at call time.
 const originalFetch = globalThis.fetch;
-const TRAWL_ENV = { TRAWL_API_KEY: "test-trawl-key" };
 
-function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+function withEnv<T>(vars: Record<string, string>, cleared: string[], fn: () => Promise<T>): Promise<T>;
+function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T>;
+function withEnv<T>(vars: Record<string, string>, clearedOrFn: string[] | (() => Promise<T>), fn?: () => Promise<T>): Promise<T> {
+  const cleared = Array.isArray(clearedOrFn) ? clearedOrFn : [];
+  const theFn = (typeof clearedOrFn === 'function' ? clearedOrFn : fn)!;
   const prior: Record<string, string | undefined> = {};
   for (const k of Object.keys(vars)) { prior[k] = Deno.env.get(k); Deno.env.set(k, vars[k]); }
-  return fn().finally(() => {
-    for (const k of Object.keys(vars)) { if (prior[k] === undefined) Deno.env.delete(k); else Deno.env.set(k, prior[k]!); }
+  for (const k of cleared) { prior[k] = Deno.env.get(k); Deno.env.delete(k); }
+  return theFn().finally(() => {
+    for (const k of [...Object.keys(vars), ...cleared]) {
+      if (prior[k] === undefined) Deno.env.delete(k); else Deno.env.set(k, prior[k]!);
+    }
   });
 }
 
+// TRAWL_ENV kept for existing withEnv call-sites — factory no longer selects Trawl.
+const TRAWL_ENV = { TRAWL_API_KEY: "test-trawl-key" };
+
+// Construct TrawlProvider directly — factory no longer selects Trawl
+// (DECISIONS.md 2026-09-11: SerpAPI is now primary).
 function trawlProvider() {
-  const provider = getSoldMarketDataProvider();
-  if (!provider) throw new Error("expected TRAWL_API_KEY to select TrawlProvider");
-  return provider;
+  const key = Deno.env.get("TRAWL_API_KEY") ?? "test-trawl-key";
+  return new TrawlProvider(key);
 }
 
 Deno.test("TrawlProvider: successful response parses comps", async () => {
@@ -238,4 +248,38 @@ Deno.test("TrawlProvider: self-pacing serializes back-to-back calls instead of d
     });
     assertEquals(calls, 2, "both calls must still complete, just paced rather than dropped");
   } finally { globalThis.fetch = originalFetch; }
+});
+
+// Factory selection tests — verify provider priority after DECISIONS.md 2026-09-11 change.
+Deno.test("factory: SERP_API_KEY present selects SerpApiEbaySoldProvider", async () => {
+  const provider = await withEnv({ SERP_API_KEY: "test-serp-key" }, ["SOLD_COMPS_API_KEY", "TRAWL_API_KEY"], async () => {
+    return getSoldMarketDataProvider();
+  });
+  if (!provider) throw new Error("expected a provider");
+  assertEquals(provider.providerId, "serpapi.com/ebay");
+});
+
+Deno.test("factory: no keys configured returns null", async () => {
+  const provider = await withEnv({}, ["SERP_API_KEY", "SOLD_COMPS_API_KEY", "TRAWL_API_KEY"], async () => {
+    return getSoldMarketDataProvider();
+  });
+  assertEquals(provider, null);
+});
+
+Deno.test("factory: SERP_API_KEY takes priority over SOLD_COMPS_API_KEY", async () => {
+  const provider = await withEnv(
+    { SERP_API_KEY: "test-serp-key", SOLD_COMPS_API_KEY: "test-sc-key" },
+    ["TRAWL_API_KEY"],
+    async () => getSoldMarketDataProvider(),
+  );
+  if (!provider) throw new Error("expected a provider");
+  assertEquals(provider.providerId, "serpapi.com/ebay");
+});
+
+Deno.test("factory: SOLD_COMPS_API_KEY is fallback when SERP_API_KEY absent", async () => {
+  const provider = await withEnv({ SOLD_COMPS_API_KEY: "test-sc-key" }, ["SERP_API_KEY", "TRAWL_API_KEY"], async () => {
+    return getSoldMarketDataProvider();
+  });
+  if (!provider) throw new Error("expected a provider");
+  assertEquals(provider.providerId, "sold-comps.com");
 });

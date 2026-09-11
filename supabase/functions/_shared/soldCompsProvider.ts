@@ -40,6 +40,7 @@ import type { SoldCompListing, MarketDataFailureReason } from "./marketData.ts"
 import type { MarketEvidenceProviderCapabilities } from "./marketplaceTypes.ts"
 import { acquireSlot, noteRateLimitHeaders } from "./providerRateLimit.ts"
 import { externalCall, ExternalCallError } from "./externalCall.ts"
+import { SerpApiEbaySoldProvider } from "./serpApiEbaySoldProvider.ts"
 
 export interface SoldCompsQuery {
   searchTerms: string       // normalized identification search terms
@@ -190,7 +191,9 @@ function mapTrawlError(err: unknown): SoldEvidenceResult {
   return { ok: false, reason: 'SOLDCOMPS_UNAVAILABLE', detail: err instanceof Error ? err.message : String(err) };
 }
 
-class TrawlProvider implements SoldMarketDataProvider {
+// @deprecated — Trawl is no longer on the default provider selection path
+// (DECISIONS.md 2026-09-11). Retained for rollback only. Use SerpApiEbaySoldProvider.
+export class TrawlProvider implements SoldMarketDataProvider {
   readonly providerId = 'trawl.dev';
   // R2 (§5.1): Trawl sources completed eBay sales, so it's a
   // verified_transaction provider for the 'ebay' marketplace even though
@@ -357,14 +360,16 @@ class SoldCompsProvider implements SoldMarketDataProvider {
 // this exact name. The prior 3-name fallback is retired now that the name
 // is confirmed — do not reintroduce alternate aliases.
 const SOLDCOMPS_API_KEY_ENV_NAME = 'SOLD_COMPS_API_KEY';
-const TRAWL_API_KEY_ENV_NAME = 'TRAWL_API_KEY';
+const SERP_API_KEY_ENV_NAME = 'SERP_API_KEY';
 
 // Factory — returns null when not configured. Callers must treat null as
 // SOLDCOMPS_NOT_CONFIGURED, never silently skip to an AI estimate or a
 // fabricated value.
+// Priority: SerpAPI (SERP_API_KEY) → SoldComps (SOLD_COMPS_API_KEY) → null.
+// Trawl is deprecated and removed from the selection path (DECISIONS.md 2026-09-11).
 export function getSoldMarketDataProvider(): SoldMarketDataProvider | null {
-  const trawlApiKey = Deno.env.get(TRAWL_API_KEY_ENV_NAME);
-  if (trawlApiKey) return new TrawlProvider(trawlApiKey);
+  const serpApiKey = Deno.env.get(SERP_API_KEY_ENV_NAME);
+  if (serpApiKey) return new SerpApiEbaySoldProvider(serpApiKey);
 
   const apiKey = Deno.env.get(SOLDCOMPS_API_KEY_ENV_NAME);
   return apiKey ? new SoldCompsProvider(apiKey) : null;
