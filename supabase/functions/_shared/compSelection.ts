@@ -74,9 +74,10 @@ function titleContainsPhrase(titleTokens: string[], phrase: string): boolean {
   return phraseTokens.every((t) => titleTokens.includes(t))
 }
 
-// Exported for reuse by queryPlanner.ts (R2 §5.4) — the same "what's left of
-// the item name once brand/model/variant/filler words are stripped" logic a
-// query rung and a head-noun heuristic both need.
+// Exported for reuse by queryPlanner.ts (R2 §5.4) and extractProductType()
+// below — the normalized remaining family tokens after brand/model/filler
+// removal. Not the authoritative product-type noun; use extractProductType()
+// for that.
 export function productFamily(identity: IdentityCandidate): string {
   const removals = [identity.brand, identity.model, identity.variant]
     .map(normalize).filter(Boolean)
@@ -85,6 +86,57 @@ export function productFamily(identity: IdentityCandidate): string {
     .filter(token => !removals.some(value => value.split(' ').includes(token)))
     .filter(token => !['model', 'series', 'vintage', 'rare', 'tested', 'working'].includes(token))
     .join(' ')
+}
+
+// Trailing tokens in AI-generated item names that describe form factor, color,
+// size, or placement — they routinely appear AFTER the true product noun.
+// "General Electric All Transistor AM Radio Vintage 1960s Table Top" is the
+// production failure case: "table" and "top" trail "radio", the real noun.
+const TRAILING_DESCRIPTOR_TOKENS = new Set([
+  // form factor / placement
+  'table', 'top', 'tabletop', 'desktop', 'portable', 'handheld', 'floor',
+  'wall', 'ceiling', 'countertop', 'pocket', 'tower',
+  // size / style
+  'large', 'small', 'big', 'mini', 'micro', 'compact', 'standard',
+  'classic', 'style', 'type',
+  // color
+  'black', 'white', 'silver', 'gold', 'red', 'blue', 'green', 'brown',
+  'grey', 'gray', 'chrome', 'tan', 'beige',
+  // era / edition
+  'edition', 'version',
+])
+
+// Four-digit year or decade token: "1960s", "2000s", "1965" — appears as a
+// trailing era descriptor after the product noun ("Radio Vintage 1960s Table Top").
+function isYearToken(t: string): boolean {
+  return /^\d{4}s?$/.test(t)
+}
+
+/**
+ * Extracts the authoritative product-type noun from the item identity by
+ * scanning productFamily() tokens right-to-left and skipping trailing
+ * form-factor, color, size, and era tokens. Returns null when all tokens are
+ * descriptors — callers fall back to the broader family/query path rather
+ * than inventing a noun.
+ *
+ * One authoritative implementation used by both scoreComp() and
+ * queryPlanner.ts (CLAUDE.md Anti-Drift Contract rule 11).
+ */
+export function extractProductType(identity: IdentityCandidate): string | null {
+  const familyTokens = productFamily(identity).split(' ').filter((t) => t.length >= 3)
+  if (!familyTokens.length) return null
+
+  let end = familyTokens.length - 1
+  while (end >= 0) {
+    const t = familyTokens[end]
+    if (!TRAILING_DESCRIPTOR_TOKENS.has(t) && !isYearToken(t)) break
+    end--
+  }
+
+  if (end < 0) return null
+  const candidate = familyTokens[end]
+  if (TRAILING_DESCRIPTOR_TOKENS.has(candidate) || isYearToken(candidate)) return null
+  return candidate
 }
 
 function scannedItemIsContaminationType(identity: IdentityCandidate, marker: string): boolean {
@@ -216,7 +268,7 @@ export function scoreComp(
     score += 25; signals.push('brand +25')
   }
   const familyTokens = productFamily(identity).split(' ').filter((t) => t.length >= 3)
-  const headNoun = familyTokens.length ? familyTokens[familyTokens.length - 1] : null
+  const headNoun = extractProductType(identity)
   if (headNoun && titleTokens.includes(headNoun)) {
     score += 15; signals.push('head noun +15')
   }
