@@ -9,7 +9,7 @@
 // fabricated 100% sell-through rate and 0-day turnover — VERY HIGH demand,
 // HOT — from nothing but a provider outage.
 //
-// Fix: searchActiveListings() now returns `null` for every failure mode
+// Fix: searchActiveListings() now throws for every operational failure mode
 // (network/HTTP error, timeout, malformed response) and only returns a real
 // ActiveMarketEvidence — including a legitimate matchingActiveCount: 0 — when
 // the Browse call actually succeeded and parsed.
@@ -45,6 +45,12 @@ function mockFetch(browseHandler: () => Response | Promise<Response>): typeof fe
   }) as typeof fetch;
 }
 
+async function expectOperationalFailure(fn: () => Promise<unknown>) {
+  let failed = false;
+  try { await fn(); } catch { failed = true; }
+  assertEquals(failed, true);
+}
+
 Deno.test('searchActiveListings: Browse success with 0 active listings is a real verified zero', async () => {
   globalThis.fetch = mockFetch(() =>
     new Response(JSON.stringify({ itemSummaries: [], total: 0 }), { status: 200 }));
@@ -73,47 +79,42 @@ Deno.test('searchActiveListings: Browse success with positive active listings pa
   } finally { globalThis.fetch = originalFetch; }
 });
 
-Deno.test('searchActiveListings: HTTP 500 error returns null, never a fabricated zero', async () => {
+Deno.test('searchActiveListings: HTTP 500 surfaces an operational failure', async () => {
   globalThis.fetch = mockFetch(() => new Response('server error', { status: 500 }));
   try {
-    const result = await withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' }));
-    assertEquals(result, null);
+    await expectOperationalFailure(() => withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' })));
   } finally { globalThis.fetch = originalFetch; }
 });
 
-Deno.test('searchActiveListings: rate limit (429) returns null, never a fabricated zero', async () => {
+Deno.test('searchActiveListings: rate limit (429) surfaces an operational failure', async () => {
   globalThis.fetch = mockFetch(() => new Response('rate limited', { status: 429 }));
   try {
-    const result = await withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' }));
-    assertEquals(result, null);
+    await expectOperationalFailure(() => withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' })));
   } finally { globalThis.fetch = originalFetch; }
 });
 
-Deno.test('searchActiveListings: network failure returns null, never a fabricated zero', async () => {
+Deno.test('searchActiveListings: network failure surfaces an operational failure', async () => {
   globalThis.fetch = ((url: string | URL) => {
     const u = String(url);
     if (u.includes('/identity/v1/oauth2/token')) return Promise.resolve(TOKEN_RESPONSE());
     return Promise.reject(new TypeError('network failure'));
   }) as typeof fetch;
   try {
-    const result = await withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' }));
-    assertEquals(result, null);
+    await expectOperationalFailure(() => withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' })));
   } finally { globalThis.fetch = originalFetch; }
 });
 
-Deno.test('searchActiveListings: malformed response body (not valid JSON) returns null, never a fabricated zero', async () => {
+Deno.test('searchActiveListings: malformed response body surfaces an operational failure', async () => {
   globalThis.fetch = mockFetch(() => new Response('<html>not json</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }));
   try {
-    const result = await withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' }));
-    assertEquals(result, null);
+    await expectOperationalFailure(() => withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' })));
   } finally { globalThis.fetch = originalFetch; }
 });
 
-Deno.test('searchActiveListings: malformed response shape (itemSummaries not an array) returns null', async () => {
+Deno.test('searchActiveListings: malformed response shape surfaces an operational failure', async () => {
   globalThis.fetch = mockFetch(() =>
     new Response(JSON.stringify({ itemSummaries: 'not-an-array', total: 5 }), { status: 200 }));
   try {
-    const result = await withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' }));
-    assertEquals(result, null);
+    await expectOperationalFailure(() => withEnv(CREDS, () => searchActiveListings({ query: 'ge radio' })));
   } finally { globalThis.fetch = originalFetch; }
 });

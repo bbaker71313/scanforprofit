@@ -41,6 +41,12 @@ function extractPrice(priceObj: unknown): number | null {
   return numLike(p.extracted) ?? numLike(p.extracted_value);
 }
 
+function isAmbiguousRange(priceObj: unknown): boolean {
+  if (typeof priceObj !== 'object' || priceObj === null) return false;
+  const p = priceObj as Record<string, unknown>;
+  return typeof p.from === 'object' || typeof p.to === 'object';
+}
+
 // Parses one raw SerpAPI eBay organic_results entry into a SoldCompListing.
 // Returns null for any record failing required-field validation — never coerces
 // a missing or malformed price into a fabricated number.
@@ -77,15 +83,15 @@ export function parseSerpApiSoldItem(raw: unknown): SoldCompListing | null {
   if (!itemId) return null;
 
   // Sold date: parse human-readable "Aug 15, 2026" or ISO "2026-08-15".
-  // Falls back to today when absent/unparseable — the show_only=Sold filter
-  // guarantees the item sold recently; the exact date is display-only.
+  // Preserve an unknown date as epoch. This keeps a real sold price usable
+  // for valuation while ensuring it cannot enter the 90-day velocity window.
   let endedAt: string;
   const rawDate = str(r.sold_date);
   if (rawDate) {
     const ts = Date.parse(rawDate);
-    endedAt = Number.isNaN(ts) ? new Date().toISOString() : new Date(ts).toISOString();
+    endedAt = Number.isNaN(ts) ? new Date(0).toISOString() : new Date(ts).toISOString();
   } else {
-    endedAt = new Date().toISOString();
+    endedAt = new Date(0).toISOString();
   }
 
   return {
@@ -121,9 +127,13 @@ function mapSerpApiEbayError(err: unknown): SoldEvidenceResult {
       };
     }
     if (err.kind === 'http' && err.status === 429) {
-      return err.retryAfterMs !== undefined
-        ? { ok: false, reason: 'PROVIDER_THROTTLED', detail: `SerpAPI rate limit; retry after ${Math.ceil(err.retryAfterMs / 1000)}s` }
-        : { ok: false, reason: 'PROVIDER_QUOTA_EXHAUSTED', detail: 'SerpAPI monthly search quota exhausted' };
+      return {
+        ok: false,
+        reason: 'PROVIDER_THROTTLED',
+        detail: err.retryAfterMs !== undefined
+          ? `SerpAPI rate limit; retry after ${Math.ceil(err.retryAfterMs / 1000)}s`
+          : 'SerpAPI rate or throughput limit reached',
+      };
     }
     const status = err.status !== undefined ? `${err.status} ` : '';
     return { ok: false, reason: 'SOLDCOMPS_UNAVAILABLE', detail: `SerpAPI eBay ${status}${err.bodyText ?? err.message}`.slice(0, 500) };
@@ -186,7 +196,12 @@ export class SerpApiEbaySoldProvider implements SoldMarketDataProvider {
       const rawResults = Array.isArray(data.organic_results) ? data.organic_results as unknown[] : [];
       const comps = rawResults.map(parseSerpApiSoldItem).filter((c): c is SoldCompListing => c !== null);
 
-      if (rawResults.length > 0 && comps.length === 0) {
+      const safelyUnusable = rawResults.length > 0 && rawResults.every((raw) => {
+        if (typeof raw !== 'object' || raw === null) return false;
+        const row = raw as Record<string, unknown>;
+        return isAmbiguousRange(row.price);
+      });
+      if (rawResults.length > 0 && comps.length === 0 && !safelyUnusable) {
         return {
           ok: false, reason: 'MALFORMED_PROVIDER_RESPONSE',
           detail: 'SerpAPI eBay returned results but none matched the expected sold-item field contract',

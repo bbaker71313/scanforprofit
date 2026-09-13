@@ -311,6 +311,7 @@
       bestMarketplaceLabel: asString(r.bestMarketplaceLabel, 'bestMarketplaceLabel', null),
       whyThisMarketplace: asString(r.whyThisMarketplace, 'whyThisMarketplace', null),
       alternativeMarketplaces: asAlternativeMarketplaces(r.alternativeMarketplaces, 'alternativeMarketplaces'),
+      scanLogId: (typeof r.scanLogId === 'number' || typeof r.scanLogId === 'string') ? r.scanLogId : null,
     };
   }
 

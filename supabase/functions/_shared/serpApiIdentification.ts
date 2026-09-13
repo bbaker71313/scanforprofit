@@ -32,6 +32,7 @@ export interface SerpApiVisualMatch {
   title: string
   source: string | null
   link: string | null
+  exactMatch: boolean
   price: number | null
   currency: string | null
   condition: string | null
@@ -65,7 +66,7 @@ function str(v: unknown): string | null {
 // Runtime-validates one raw visual_matches entry. Drops (never fabricates)
 // anything that fails to parse — a malformed match is simply excluded, not
 // coerced into a guessed value.
-function parseVisualMatch(raw: unknown): SerpApiVisualMatch | null {
+function parseVisualMatch(raw: unknown, exactMatch = false): SerpApiVisualMatch | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const r = raw as Record<string, unknown>;
   const title = str(r.title);
@@ -75,6 +76,7 @@ function parseVisualMatch(raw: unknown): SerpApiVisualMatch | null {
     title,
     source: str(r.source),
     link: str(r.link),
+    exactMatch,
     price: priceObj ? numLike(priceObj.extracted_value) : null,
     currency: priceObj ? str(priceObj.currency) : null,
     condition: str(r.condition),
@@ -99,11 +101,16 @@ async function callSerpApiLens(imageUrl: string, apiKey: string): Promise<SerpAp
       const errorMsg = str(data.error) ?? `SerpAPI reported status: ${String(status ?? 'unknown')}`;
       return { ok: false, reason: 'PROVIDER_UNAVAILABLE', detail: errorMsg };
     }
-    const rawMatches = Array.isArray(data.visual_matches) ? data.visual_matches as unknown[] : [];
-    const matches = rawMatches.map(parseVisualMatch).filter((m): m is SerpApiVisualMatch => m !== null);
-    // A confident top match is position-1 in the response array by
-    // construction (SerpAPI returns visual_matches ranked) — never re-sort
-    // or re-rank client-side.
+    // SerpAPI exposes exact_matches and visual_matches as separate top-level
+    // arrays. Preserve that distinction explicitly; an arbitrary field on a
+    // visual-match row must never be treated as proof of exact identity.
+    const rawExact = Array.isArray(data.exact_matches) ? data.exact_matches as unknown[] : [];
+    const rawVisual = Array.isArray(data.visual_matches) ? data.visual_matches as unknown[] : [];
+    const matches = [
+      ...rawExact.map((row) => parseVisualMatch(row, true)),
+      ...rawVisual.map((row) => parseVisualMatch(row, false)),
+    ].filter((m): m is SerpApiVisualMatch => m !== null);
+    // Exact matches lead; otherwise preserve the provider's visual ranking.
     const itemName = matches.length ? matches[0].title : null;
     return { ok: true, itemName, matches };
   } catch (err) {

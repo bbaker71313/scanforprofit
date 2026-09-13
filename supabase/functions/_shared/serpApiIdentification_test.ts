@@ -84,10 +84,30 @@ Deno.test('identifyViaSerpApi: happy path uploads, signs, calls SerpAPI, parses 
       assertEquals(result.itemName, 'Minolta X-700 35mm SLR Film Camera');
       assertEquals(result.matches.length, 2);
       assertEquals(result.matches[0].price, 85);
+      assertEquals(result.matches[0].exactMatch, false);
     }
     assertEquals(fake.calls.uploaded.length, 1);
     assertEquals(fake.calls.removed.length, 1);
     assertEquals(fake.calls.uploaded[0], fake.calls.removed[0]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+Deno.test('identifyViaSerpApi: top-level exact_matches are marked exact and take precedence', async () => {
+  globalThis.fetch = mockSerpApiFetch(() => new Response(JSON.stringify({
+    search_metadata: { status: 'Success' },
+    exact_matches: [{ title: 'GE 7-2887 Superadio III' }],
+    visual_matches: [{ title: 'Generic transistor radio' }],
+  }), { status: 200 }));
+  const fake = makeFakeSupabase();
+  try {
+    const result = await withEnv({ [ENV_NAME]: 'test-key' }, () =>
+      identifyViaSerpApi(fake, new Uint8Array([1, 2, 3]), 'image/jpeg'));
+    assertEquals(result.ok, true);
+    if (result.ok) {
+      assertEquals(result.itemName, 'GE 7-2887 Superadio III');
+      assertEquals(result.matches[0].exactMatch, true);
+      assertEquals(result.matches[1].exactMatch, false);
+    }
   } finally { globalThis.fetch = originalFetch; }
 });
 

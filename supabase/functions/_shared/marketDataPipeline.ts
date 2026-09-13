@@ -22,9 +22,12 @@ import { getItemIdentifier, type IdentifyInput } from "./itemIdentification.ts"
 import { catalogSearchByGtin, catalogSearchByKeywords } from "./ebayCatalog.ts"
 import { resolveCategory } from "./ebayTaxonomy.ts"
 import { searchActiveListings } from "./ebayBrowse.ts"
+import { EbayAppAuthError } from "./ebayAppAuth.ts"
+import { ExternalCallError } from "./externalCall.ts"
 import { getSoldMarketDataProvider } from "./soldCompsProvider.ts"
 import {
   isCoherentPriceSet, isCoherentPriceSpread, rejectOutliers, selectComparableSoldComps,
+  type QueryCandidate,
 } from "./compSelection.ts"
 import { planMarketEvidenceQueries } from "./queryPlanner.ts"
 import { computeSoldPriceStats, computeMarketTurnoverDays, computeSellThroughRate, computeDemandLevel } from "./marketMetrics.ts"
@@ -96,12 +99,23 @@ async function safeResolveCategory(identity: IdentityCandidate, queryForActive: 
 // IdentityCandidate. Split out so a caller that already has identification
 // (e.g. a scan handler's own AI call) can reuse it here instead of
 // triggering a second, redundant identification call.
-export async function resolveVerifiedMarketData(identity: IdentityCandidate): Promise<MarketDataResult> {
+export async function resolveVerifiedMarketData(
+  identity: IdentityCandidate,
+  options: { maxSoldQueries?: number } = {},
+): Promise<MarketDataResult> {
   // R2 (§5.4): plan queries from the configured provider's own capabilities
   // (see EBAY_BROWSE_FALLBACK_CAPS above) instead of a provider-naive builder.
   const soldProvider = getSoldMarketDataProvider();
-  const queries = planMarketEvidenceQueries(identity, soldProvider?.capabilities ?? EBAY_BROWSE_FALLBACK_CAPS);
-  if (!queries.length) {
+  const plannedQueries = planMarketEvidenceQueries(identity, soldProvider?.capabilities ?? EBAY_BROWSE_FALLBACK_CAPS);
+  // SerpAPI is metered. Bound one scan to two sold searches while preserving
+  // one highest-precision and one broader/family fallback query. This keeps
+  // the 250-scan paid tier within the $25/1,000-search operating budget even
+  // when a photo also consumes one Lens search.
+  const firstBroad = plannedQueries.find((q) => q.precision === 'product_family' || q.precision === 'substitute');
+  const queries = [plannedQueries[0], firstBroad].filter((q, i, all): q is QueryCandidate =>
+    !!q && all.findIndex((x) => x?.query === q.query) === i
+  ).slice(0, Math.max(0, Math.min(2, options.maxSoldQueries ?? 2)));
+  if (!plannedQueries.length) {
     return { ok: false, reason: 'IDENTIFICATION_UNRESOLVED', detail: 'Identification produced no usable search terms' };
   }
 
@@ -181,22 +195,39 @@ export async function resolveVerifiedMarketData(identity: IdentityCandidate): Pr
   }
 
   const selected = qualified ?? partial;
-  const queryForActive = selected?.query ?? queries[0].query;
+  const queryForActive = selected?.query ?? plannedQueries[0].query;
 
   // Product/catalog and category resolution are best-effort — run against
   // the winning evidence query when one exists, else the first candidate.
   // §6.4 (P2-11): contained — a credential/outage failure here must never
   // discard an otherwise-qualified decision (see safeCatalogMatch/
   // safeResolveCategory above).
-  const catalogMatch = await safeCatalogMatch(identity, queryForActive);
-  const category = await safeResolveCategory(identity, queryForActive);
+  const [catalogMatch, category] = await Promise.all([
+    safeCatalogMatch(identity, queryForActive),
+    safeResolveCategory(identity, queryForActive),
+  ]);
 
   // Active evidence is best-effort informational/supporting evidence now,
   // never a hard requirement for a decision-capable result (Profit Scanner
   // v2) — a missing count is still never treated as a verified zero.
-  const activeCandidate = await searchActiveListings({
-    query: queryForActive, categoryId: category?.categoryId ?? undefined,
-  }).catch(() => null);
+  let activeCandidate: ActiveMarketEvidence | null = null;
+  let activeProviderFailure: { reason: MarketDataFailureReason; detail: string } | null = null;
+  try {
+    activeCandidate = await searchActiveListings({
+      query: queryForActive, categoryId: category?.categoryId ?? undefined,
+    });
+  } catch (err) {
+    if (err instanceof EbayAppAuthError) {
+      activeProviderFailure = { reason: 'MARKETPLACE_AUTH_FAILED', detail: err.message };
+    } else if (err instanceof ExternalCallError) {
+      activeProviderFailure = {
+        reason: err.kind === 'timeout' ? 'PROVIDER_TIMEOUT' : err.status === 429 ? 'PROVIDER_THROTTLED' : 'BROWSE_UNAVAILABLE',
+        detail: err.message,
+      };
+    } else {
+      activeProviderFailure = { reason: 'BROWSE_UNAVAILABLE', detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
 
   // R3 (§6.2, T2): proportional support, not "every sampled listing must
   // match." retainedCount is the ONLY count feeding evidence quality;
@@ -250,7 +281,13 @@ export async function resolveVerifiedMarketData(identity: IdentityCandidate): Pr
   const activeSignal = activeMarketEvidence ? {
     count: activeMarketEvidence.retainedCount, coherent: activeAskingPricesCoherent,
   } : null;
-  const evidenceQuality = assessEvidenceQuality({ soldEvidence: soldSignal, activeEvidence: activeSignal });
+  let evidenceQuality = assessEvidenceQuality({ soldEvidence: soldSignal, activeEvidence: activeSignal });
+  // A provider that cannot distinguish accepted Best Offers cannot prove the
+  // displayed amount was the final transaction price. It may support LIST,
+  // but cannot independently earn the strong-evidence/HOT tier.
+  if (evidenceQuality === 'strong' && soldProvider?.capabilities.suppliesBestOfferFlag === false) {
+    evidenceQuality = 'moderate';
+  }
 
   if (evidenceQuality === 'none' || evidenceQuality === 'weak') {
     // §6.4/P1-8: an operational failure encountered along the way is a more
@@ -260,6 +297,12 @@ export async function resolveVerifiedMarketData(identity: IdentityCandidate): Pr
     if (soldProviderFailure) {
       return {
         ok: false, reason: soldProviderFailure.reason, detail: soldProviderFailure.detail,
+        audit: { attemptedQueries, selectedQuery: selected?.query ?? null, activeSample },
+      };
+    }
+    if (activeProviderFailure) {
+      return {
+        ok: false, reason: activeProviderFailure.reason, detail: activeProviderFailure.detail,
         audit: { attemptedQueries, selectedQuery: selected?.query ?? null, activeSample },
       };
     }
@@ -304,7 +347,8 @@ export async function resolveVerifiedMarketData(identity: IdentityCandidate): Pr
   let sellThroughRate: number | null = null;
   let demandLevel: MarketMetrics['demandLevel'] = null;
   if (qualified && activeMarketEvidence) {
-    const soldCount90d = qualified.comps.length;
+    const windowStart = Date.now() - DEFAULT_SOLD_WINDOW_DAYS * 86_400_000;
+    const soldCount90d = qualified.comps.filter((comp) => Date.parse(comp.endedAt) >= windowStart).length;
     turnover = computeMarketTurnoverDays(soldCount90d, DEFAULT_SOLD_WINDOW_DAYS, activeMarketEvidence.retainedCount);
     sellThroughRate = computeSellThroughRate(soldCount90d, activeMarketEvidence.retainedCount);
     demandLevel = computeDemandLevel(sellThroughRate, turnover?.marketTurnoverDays ?? null);

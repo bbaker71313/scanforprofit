@@ -92,12 +92,11 @@ Deno.test("parseSerpApiSoldItem: unsold_date present is excluded (defensive guar
   assertEquals(parseSerpApiSoldItem(item), null);
 });
 
-Deno.test("parseSerpApiSoldItem: sold_date absent falls back to today (not a rejection)", () => {
+Deno.test("parseSerpApiSoldItem: sold_date absent uses epoch so it cannot inflate recent velocity", () => {
   const { sold_date: _d, ...noDate } = VALID_ITEM;
   const result = parseSerpApiSoldItem(noDate);
   if (!result) throw new Error("expected a parsed comp");
-  const ts = Date.parse(result.endedAt);
-  assertEquals(Number.isNaN(ts), false);
+  assertEquals(result.endedAt, new Date(0).toISOString());
   assertEquals(result.soldPrice, 85.00);
 });
 
@@ -212,12 +211,12 @@ Deno.test("SerpApiEbaySoldProvider: 429 with Retry-After is PROVIDER_THROTTLED",
   } finally { globalThis.fetch = originalFetch; }
 });
 
-Deno.test("SerpApiEbaySoldProvider: 429 without Retry-After is PROVIDER_QUOTA_EXHAUSTED", async () => {
+Deno.test("SerpApiEbaySoldProvider: 429 without Retry-After is PROVIDER_THROTTLED", async () => {
   globalThis.fetch = (() => Promise.resolve(new Response("", { status: 429 }))) as typeof fetch;
   try {
     const result = await serpProvider().searchSoldComps({ searchTerms: "radio" });
     if (result.ok) throw new Error("expected failure");
-    assertEquals(result.reason, "PROVIDER_QUOTA_EXHAUSTED");
+    assertEquals(result.reason, "PROVIDER_THROTTLED");
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -248,6 +247,18 @@ Deno.test("SerpApiEbaySoldProvider: results present but none parseable is MALFOR
     const result = await serpProvider().searchSoldComps({ searchTerms: "radio" });
     if (result.ok) throw new Error("expected failure");
     assertEquals(result.reason, "MALFORMED_PROVIDER_RESPONSE");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+Deno.test("SerpApiEbaySoldProvider: ambiguous price ranges are ignored rather than treated as malformed", async () => {
+  globalThis.fetch = (() => Promise.resolve(serpSuccess([{
+    product_id: "123", title: "GE radio", sold_date: "Aug 10, 2026",
+    price: { from: { extracted: 10 }, to: { extracted: 20 } },
+  }]))) as typeof fetch;
+  try {
+    const result = await serpProvider().searchSoldComps({ searchTerms: "ge radio" });
+    if (!result.ok) throw new Error(`expected ok, got ${JSON.stringify(result)}`);
+    assertEquals(result.comps.length, 0);
   } finally { globalThis.fetch = originalFetch; }
 });
 

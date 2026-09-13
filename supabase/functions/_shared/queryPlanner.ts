@@ -54,7 +54,7 @@ function planTermMatchedQueries(identity: IdentityCandidate, maxTerms: number): 
   if (identity.gtin) {
     rungs.push({ query: identity.gtin, precision: 'exact_identifier_variant' })
   }
-  if (variant) {
+  if (model && variant) {
     rungs.push({ query: [brand, model, variant].filter(Boolean).join(' '), precision: 'exact_model_variant' })
   }
   if (model) {

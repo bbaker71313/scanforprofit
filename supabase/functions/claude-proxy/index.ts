@@ -151,12 +151,27 @@ export interface MarketplaceEvidenceBundle {
 // base (Claude-only) identity is used as-is.
 function mergeSerpApiIdentity(
   base: IdentityCandidate,
-  serp: { itemName: string | null },
+  serp: { itemName: string | null; matches: Array<{ title: string; exactMatch: boolean }> },
 ): IdentityCandidate {
   if (!serp.itemName) return base;
+  const normalize = (value: string | null) => (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const title = normalize(serp.itemName);
+  const model = normalize(base.model);
+  const brand = normalize(base.brand);
+  const exact = serp.matches[0]?.exactMatch === true;
+  const corroborated = (model.length >= 2 && title.includes(model)) ||
+    (brand.length >= 3 && title.split(' ').includes(brand));
+  // SerpAPI ranks results by relevance, but position one is not itself a
+  // confidence signal. Never create a hybrid identity from an uncorroborated
+  // visual result.
+  if (!exact && !corroborated) return base;
   return {
     ...base,
     itemName: serp.itemName,
+    model: model && title.includes(model) ? base.model : null,
+    variant: base.variant && title.includes(normalize(base.variant)) ? base.variant : null,
+    normalizedSearchTerms: [serp.itemName, ...base.normalizedSearchTerms]
+      .filter((value, index, all) => all.findIndex((other) => normalize(other) === normalize(value)) === index),
     evidenceUsed: base.evidenceUsed.includes('visual_product_search')
       ? base.evidenceUsed
       : [...base.evidenceUsed, 'visual_product_search'],
@@ -181,6 +196,7 @@ async function resolveMarketplaceEvidenceBundle(
   evidenceKind: IdentificationEvidenceKind,
   supabase: ReturnType<typeof createClient>,
   serpImage?: { bytes: Uint8Array; mimeType: string } | null,
+  maxSoldQueries = 2,
 ): Promise<MarketplaceEvidenceBundle> {
   const noInformational: MarketplaceEvidenceBundle['ebayInformational'] = {
     sellThroughRate: null, avgDaysToSell: null, demandLevel: null,
@@ -200,7 +216,7 @@ async function resolveMarketplaceEvidenceBundle(
   let ebayEvidence: MarketplaceEvidenceResult;
   let ebayInformational: MarketplaceEvidenceBundle['ebayInformational'] = noInformational;
   try {
-    const rawEbay = await resolveVerifiedMarketData(identity);
+    const rawEbay = await resolveVerifiedMarketData(identity, { maxSoldQueries });
     if (rawEbay.ok) {
       ebayInformational = {
         sellThroughRate: rawEbay.metrics.sellThroughRate,
@@ -297,6 +313,7 @@ const UNAVAILABLE_REASON_MAP: Record<ProviderFailureReason, ScanUnavailableReaso
   IDENTIFICATION_UNRESOLVED: 'IDENTIFICATION_UNRESOLVED',
   INSUFFICIENT_VERIFIED_MARKET_DATA: 'NO_MARKET_EVIDENCE',
   EVIDENCE_TOO_WEAK: 'EVIDENCE_TOO_WEAK',
+  MARKETPLACE_AUTH_FAILED: 'MARKETPLACE_AUTH_FAILED',
 };
 
 // eBay is the only marketplace with a real evidence provider today (task doc
@@ -510,13 +527,28 @@ export function resolveScanResultCore(
   };
 }
 
-function detectImageMime(buf: ArrayBuffer): 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
+function detectImageMime(buf: ArrayBuffer): 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' | null {
+  if (buf.byteLength < 12) return null;
   const b = new Uint8Array(buf, 0, 12);
   if (b[0] === 0xFF && b[1] === 0xD8) return 'image/jpeg';
   if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'image/png';
   if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
   if (b[4] === 0x57 && b[5] === 0x45 && b[6] === 0x42 && b[7] === 0x50) return 'image/webp';
-  return 'image/jpeg'; // fallback
+  return null;
+}
+
+const MAX_SCAN_IMAGES = 6;
+const MAX_SCAN_IMAGE_BYTES = 8 * 1024 * 1024;
+
+function validateBase64Images(images: unknown): string | null {
+  if (!Array.isArray(images)) return 'No image provided';
+  if (images.length === 0) return 'No image provided';
+  if (images.length > MAX_SCAN_IMAGES) return `A maximum of ${MAX_SCAN_IMAGES} images is allowed`;
+  for (const image of images) {
+    if (typeof image !== 'string' || image.length === 0) return 'Invalid image payload';
+    if (image.length * 0.75 > MAX_SCAN_IMAGE_BYTES) return 'Image exceeds the 8MB limit';
+  }
+  return null;
 }
 
 async function callAnthropic(
@@ -531,14 +563,19 @@ async function callAnthropic(
   const textPrompt = userText ?? (images.length > 1
     ? `Analyze these ${images.length} photos of the same item from different angles.`
     : 'Analyze this image.');
-  const res = await fetch(ANTHROPIC_MESSAGES_URL, {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  let res: Response;
+  try {
+    res = await fetch(ANTHROPIC_MESSAGES_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': key,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({
+      signal: controller.signal,
+      body: JSON.stringify({
       model: CLAUDE_MODEL,
       max_tokens: maxTokens,
       system,
@@ -546,8 +583,11 @@ async function callAnthropic(
         role: 'user',
         content: [...imageBlocks, { type: 'text', text: textPrompt }],
       }],
-    }),
-  });
+      }),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   const data = await res.json();
   if (!res.ok) throw new Error(data.error?.message ?? 'Anthropic error');
   const raw = data.content[0].text as string;
@@ -670,10 +710,11 @@ async function finalizeSingleOrTextScan(
   // decisionAvailable:false and every authoritative field null.
   const core = resolveScanResultCore(bundle, ai, acquisitionCost, settings, shipForCalc);
   const displayRoi = roiForDisplay(core.roi, acquisitionCost);
+  const resolvedItemName = bundle.identity?.itemName ?? (ai.item_name as string);
 
   const { data: logRow } = await supabase.from('scan_log').insert({
     user_id: userId, scan_type: scanType, decision: core.decision,
-    item_name: ai.item_name, category: ai.category,
+    item_name: resolvedItemName, category: ai.category,
     estimated_profit: core.estimatedProfit, estimated_sell: core.estimatedSell,
     cost: core.acquisitionCost, roi: core.roi, confidence, bought: false,
     raw_response: {
@@ -697,7 +738,7 @@ async function finalizeSingleOrTextScan(
     decisionStatus: core.decisionStatus,
     unavailableReason: core.unavailableReason,
     noEvidenceReason: core.noEvidenceReason,
-    itemName: ai.item_name, category: ai.category, brand: (ai.brand as string) ?? null,
+    itemName: resolvedItemName, category: ai.category, brand: bundle.identity?.brand ?? (ai.brand as string) ?? null,
     acquisitionCost: core.acquisitionCost,
     estimatedSell: core.estimatedSell,
     estimatedProfit: core.estimatedProfit,
@@ -872,7 +913,11 @@ async function handleShelfScan(
     // the same M/L logic (isReasonablyIdentifiable gate, zero-evidence
     // SKIP) via resolveScanResultCore below — they just identify from
     // Claude's own vision call alone, same as before R3.
-    const bundle = await resolveMarketplaceEvidenceBundle(ai, 'visual_ai', supabase);
+    // A shelf request may contain up to eight items. Metered sold searches
+    // here would make one entitlement scan consume up to 16 paid queries.
+    // Use free active-market evidence for shelf decisions; single/text scans
+    // retain the bounded two-query sold-evidence path.
+    const bundle = await resolveMarketplaceEvidenceBundle(ai, 'visual_ai', supabase, null, 0);
     const confidence = (ai.confidence as number) ?? null;
 
     // Same single authoritative gate as single/text scan (resolveScanResultCore)
@@ -887,7 +932,7 @@ async function handleShelfScan(
       decisionStatus: core.decisionStatus,
       unavailableReason: core.unavailableReason,
       noEvidenceReason: core.noEvidenceReason,
-      itemName: ai.item_name, category: ai.category, brand: (ai.brand as string) ?? null,
+      itemName: bundle.identity?.itemName ?? (ai.item_name as string), category: ai.category, brand: bundle.identity?.brand ?? (ai.brand as string) ?? null,
       avgSoldPrice: core.estimatedSell, maxBuyPrice: core.maxBuyPrice, maxBuyPriceLimitedBy: core.maxBuyPriceLimitedBy,
       confidence, sellThroughRate: core.sellThroughRate, avgDaysToSell: core.avgDaysToSell, demandLevel: core.demandLevel,
       conditionNotes: ai.condition_notes ?? '', notes: (ai.notes as string) ?? '',
@@ -947,6 +992,13 @@ export async function handleBuyItem(
   const clientOpId = body.scanLogId != null ? `scan:${body.scanLogId}`
     : (body.clientOpId != null ? String(body.clientOpId) : null);
 
+  if (body.scanLogId != null) {
+    const { data: ownedScan, error: scanError } = await supabase.from('scan_log')
+      .select('id').eq('id', body.scanLogId).eq('user_id', userId).maybeSingle();
+    if (scanError) throw new Error(scanError.message);
+    if (!ownedScan) throw new HttpError('scan_not_found', 404);
+  }
+
   if (clientOpId) {
     const { data: existing } = await supabase.from('inventory')
       .select('id').eq('user_id', userId).eq('client_op_id', clientOpId).maybeSingle();
@@ -971,7 +1023,7 @@ export async function handleBuyItem(
     cost: body.cost,
     sell_price: body.sellPrice ?? null,
     status: 'Unlisted',
-    platform: 'eBay',
+    platform: body.platform ?? 'eBay',
     created_from: 'scan',
     sourcing_meta: body.sourcingMeta ?? null,
     photos: '[]',
@@ -991,7 +1043,12 @@ export async function handleBuyItem(
 
   if (body.scanLogId) {
     await supabase.from('scan_log')
-      .update({ bought: true, cost: body.cost })
+      .update({
+        bought: true,
+        cost: body.cost,
+        estimated_profit: body.estimatedProfit ?? null,
+        roi: body.roi ?? null,
+      })
       .eq('id', body.scanLogId).eq('user_id', userId);
   }
 
@@ -1867,6 +1924,8 @@ Deno.serve(async (req: Request) => {
       let b64 = '';
       let imageMime: string = 'image/jpeg';
       if (imageFile) {
+        if (imageFile.size > MAX_SCAN_IMAGE_BYTES) return json({ error: 'Image exceeds the 8MB limit' }, 413);
+        if (imageFile.size < 12) return json({ error: 'Invalid image file' }, 400);
         const buf = await imageFile.arrayBuffer();
         // Detect ISOBMFF container: bytes 4-7 are 'ftyp' (0x66 0x74 0x79 0x70).
         // Shared by HEIC, AVIF, MP4, MOV. Check bytes 8-11 for the actual brand.
@@ -1881,7 +1940,9 @@ Deno.serve(async (req: Request) => {
           return json({ error: 'This image format is not supported. Please use JPEG, PNG, or WebP.' }, 415);
         }
         b64 = ab2b64(buf);
-        imageMime = detectImageMime(buf);
+        const detected = detectImageMime(buf);
+        if (!detected) return json({ error: 'This image format is not supported. Please use JPEG, PNG, GIF, or WebP.' }, 415);
+        imageMime = detected;
       }
       body = {
         type: form.get('type') as string,
@@ -1945,6 +2006,18 @@ Deno.serve(async (req: Request) => {
 
   const isScan = body.type === 'single_scan' || body.type === 'shelf_scan' || body.type === 'text_scan';
   if (isScan) {
+    if (!anthropicKey) return json({ error: 'AI service not configured' }, 503);
+    if (body.acquisitionCost !== null && body.acquisitionCost !== undefined && body.acquisitionCost !== '' && acquisitionCost === null) {
+      return json({ error: 'Acquisition cost must be a non-negative number' }, 400);
+    }
+    if (body.type === 'text_scan') {
+      const text = (body.hint as string) ?? (body.text as string) ?? '';
+      if (!text.trim()) return json({ error: 'No item description provided' }, 400);
+    } else {
+      const imgs = Array.isArray(body.images) ? body.images : body.imageBase64 ? [body.imageBase64] : [];
+      const imageError = validateBase64Images(imgs);
+      if (imageError) return json({ error: imageError }, imageError.includes('8MB') ? 413 : 400);
+    }
     // §5.1 — atomic increment + monthly reset + limit check in one RPC,
     // replacing the read-then-write race. p_limit null = unlimited.
     const limit = resolveScanLimit(dbUser.tier);

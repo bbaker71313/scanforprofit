@@ -32,6 +32,7 @@ const REASON_MAP: Record<MarketDataFailureReason, ProviderFailureReason> = {
   BROWSE_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
   INSUFFICIENT_VERIFIED_MARKET_DATA: 'INSUFFICIENT_VERIFIED_MARKET_DATA',
   EVIDENCE_TOO_WEAK: 'EVIDENCE_TOO_WEAK',
+  MARKETPLACE_AUTH_FAILED: 'MARKETPLACE_AUTH_FAILED',
   PROVIDER_TIMEOUT: 'PROVIDER_TIMEOUT',
   PROVIDER_THROTTLED: 'PROVIDER_THROTTLED',
   PROVIDER_QUOTA_EXHAUSTED: 'PROVIDER_QUOTA_EXHAUSTED',
@@ -83,7 +84,7 @@ export function mapEbayResultToEvidence(result: MarketDataResult): MarketplaceEv
       evidenceType: stats.compCount > 0 ? 'verified_transaction' : 'active_market',
       // R3 (T2): totalActiveResultCount (informational competition volume)
       // here, never used as if every result were a matched comparable.
-      matchedItemCount: stats.compCount + (active?.totalActiveResultCount ?? 0),
+      matchedItemCount: stats.compCount + (active?.retainedCount ?? 0),
       comparableCount: stats.compCount,
       askingPrices,
       medianSoldPrice: stats.compCount > 0 ? stats.medianSoldPrice : null,
