@@ -6,6 +6,29 @@ actually live right now, use `mcp__Supabase__list_edge_functions` (or the Supaba
 dashboard) directly; this file records what was last *deployed through a recorded
 mechanism*, which may lag a manual/ad-hoc deploy done another way.
 
+## Scanner audit remediation — 2026-09-13
+
+`claude-proxy` was deployed through the Supabase MCP from PR #161's complete
+35-file dependency closure. The final deployment is **v119**, `ACTIVE`, with
+`verify_jwt:false` unchanged because the function performs its existing custom
+httpOnly-cookie and CSRF-header authentication in the function body. The final
+scanner-code commit on GitHub is `7c97a08`.
+
+Production verification used an authenticated temporary account and the text
+input “General Electric GE Superadio III model 7-2887 ... used working” at an
+entered cost of $2.99. Final scan id 79 (deleted with the temporary account
+after verification) recorded SerpAPI's operational 503, the explicit failover
+to SoldComps, 40 returned records, and six coherent exact-model-variant comps.
+It returned a verified $33.99 expected sale price, $25.33 net profit, 847.20%
+ROI, strong evidence, and `HOT`. Independent SQL recomputation matched both
+financial values. eBay Browse returned zero active listings; v119 correctly
+labeled the evidence `eBay sold listings (sold-comps.com)` without claiming
+active evidence.
+
+All validation passed before the final deploy: 349 Deno backend tests, 70
+shared-engine tests, 49 browser-contract tests, both TypeScript checks, and
+`git diff --check`. No migration was required.
+
 ## R3 SerpAPI identification deploy — 2026-09-10
 
 `claude-proxy` was deployed via the **Supabase CLI** (`npx supabase functions
