@@ -289,6 +289,9 @@ Deno.test("unavailableReason: maps each eBay SYSTEM-failure reason to its distin
     ['SOLDCOMPS_NOT_CONFIGURED', 'PROVIDER_NOT_CONFIGURED'],
     ['PROVIDER_THROTTLED', 'PROVIDER_THROTTLED'],
     ['PROVIDER_QUOTA_EXHAUSTED', 'PROVIDER_QUOTA_EXHAUSTED'],
+    ['PROVIDER_TIMEOUT', 'PROVIDER_TIMEOUT'],
+    ['MALFORMED_PROVIDER_RESPONSE', 'MALFORMED_PROVIDER_RESPONSE'],
+    ['MARKETPLACE_AUTH_FAILED', 'MARKETPLACE_AUTH_FAILED'],
   ];
   for (const [reason, wanted] of expected) {
     const core = resolveScanResultCore(

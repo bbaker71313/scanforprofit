@@ -66,6 +66,11 @@ test('normalizeSingleScanResult: happy path maps camelCase -> snake_case item sh
   assert.equal(out.fin.roi, 298.75);
 });
 
+test('normalizeSingleScanResult: preserves the server scanLogId for idempotent buy', () => {
+  const out = normalizeSingleScanResult(baseSingleScan({ scanLogId: 417 }));
+  assert.equal(out.scanLogId, 417);
+});
+
 test('normalizeSingleScanResult: null roi (zero acquisition cost) is preserved, never coerced to 0', () => {
   const out = normalizeSingleScanResult(baseSingleScan({ roi: null, acquisitionCost: 0 }));
   assert.equal(out.fin.roi, null);

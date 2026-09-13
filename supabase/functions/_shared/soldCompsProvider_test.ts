@@ -266,14 +266,38 @@ Deno.test("factory: no keys configured returns null", async () => {
   assertEquals(provider, null);
 });
 
-Deno.test("factory: SERP_API_KEY takes priority over SOLD_COMPS_API_KEY", async () => {
+Deno.test("factory: multiple configured providers expose the explicit failover order", async () => {
   const provider = await withEnv(
     { SERP_API_KEY: "test-serp-key", SOLD_COMPS_API_KEY: "test-sc-key" },
     ["TRAWL_API_KEY"],
     async () => getSoldMarketDataProvider(),
   );
   if (!provider) throw new Error("expected a provider");
-  assertEquals(provider.providerId, "serpapi.com/ebay");
+  assertEquals(provider.providerId, "serpapi.com/ebay -> sold-comps.com");
+});
+
+Deno.test("factory: a SerpAPI operational failure is audited before SoldComps succeeds", async () => {
+  globalThis.fetch = ((url: string | URL) => {
+    if (String(url).includes('serpapi.com')) {
+      return Promise.resolve(new Response('provider unavailable', { status: 503 }));
+    }
+    return Promise.resolve(new Response(JSON.stringify({ items: [LIVE_RECORD] }), { status: 200 }));
+  }) as typeof fetch;
+  try {
+    const provider = await withEnv(
+      { SERP_API_KEY: "test-serp-key", SOLD_COMPS_API_KEY: "test-sc-key" },
+      ["TRAWL_API_KEY"],
+      async () => getSoldMarketDataProvider(),
+    );
+    if (!provider) throw new Error("expected a provider");
+    const result = await provider.searchSoldComps({ searchTerms: 'air jordan 1' });
+    if (!result.ok) throw new Error(`expected fallback success, got ${JSON.stringify(result)}`);
+    assertEquals(result.providerId, 'sold-comps.com');
+    assertEquals(result.comps.length, 1);
+    assertEquals(result.providerAttempts?.map((attempt) => [attempt.providerId, attempt.ok]), [
+      ['serpapi.com/ebay', false], ['sold-comps.com', true],
+    ]);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 Deno.test("factory: SOLD_COMPS_API_KEY is fallback when SERP_API_KEY absent", async () => {

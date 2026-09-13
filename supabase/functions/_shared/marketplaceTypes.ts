@@ -43,7 +43,7 @@ export type ProviderFailureReason =
   // MarketDataFailureReason in marketData.ts for why.
   | 'PROVIDER_THROTTLED' | 'PROVIDER_QUOTA_EXHAUSTED'
   | 'MALFORMED_PROVIDER_RESPONSE' | 'IDENTIFICATION_UNRESOLVED'
-  | 'INSUFFICIENT_VERIFIED_MARKET_DATA' | 'EVIDENCE_TOO_WEAK'
+  | 'INSUFFICIENT_VERIFIED_MARKET_DATA' | 'EVIDENCE_TOO_WEAK' | 'MARKETPLACE_AUTH_FAILED'
 
 // R1 (P1-10): the query-cascade forensic trail, carried through from
 // MarketDataResult instead of being discarded at this provider boundary.

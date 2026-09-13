@@ -147,7 +147,7 @@ export async function getReverbMarketplaceEvidence(identity: IdentityCandidate):
     evidence: {
       marketplace: 'reverb',
       evidenceType: 'active_market',
-      matchedItemCount: rawListings.length,
+      matchedItemCount: retainedCount,
       comparableCount: retainedCount,
       askingPrices: prices,
       medianSoldPrice: null,

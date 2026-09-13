@@ -48,8 +48,16 @@ export interface SoldCompsQuery {
 }
 
 export type SoldEvidenceResult =
-  | { ok: true; comps: SoldCompListing[] }
-  | { ok: false; reason: MarketDataFailureReason; detail: string }
+  | { ok: true; comps: SoldCompListing[]; providerId?: string; suppliesBestOfferFlag?: boolean; providerAttempts?: SoldProviderAttempt[] }
+  | { ok: false; reason: MarketDataFailureReason; detail: string; providerId?: string; providerAttempts?: SoldProviderAttempt[] }
+
+export interface SoldProviderAttempt {
+  providerId: string
+  ok: boolean
+  reason: MarketDataFailureReason | null
+  detail: string | null
+  latencyMs: number
+}
 
 export interface SoldMarketDataProvider {
   readonly providerId: string
@@ -191,8 +199,8 @@ function mapTrawlError(err: unknown): SoldEvidenceResult {
   return { ok: false, reason: 'SOLDCOMPS_UNAVAILABLE', detail: err instanceof Error ? err.message : String(err) };
 }
 
-// @deprecated — Trawl is no longer on the default provider selection path
-// (DECISIONS.md 2026-09-11). Retained for rollback only. Use SerpApiEbaySoldProvider.
+// Last-resort provider in the explicit, audited failover chain. It is reached
+// only when the primary providers fail operationally (DECISIONS.md 2026-09-13).
 export class TrawlProvider implements SoldMarketDataProvider {
   readonly providerId = 'trawl.dev';
   // R2 (§5.1): Trawl sources completed eBay sales, so it's a
@@ -277,8 +285,7 @@ export class TrawlProvider implements SoldMarketDataProvider {
 
 class SoldCompsProvider implements SoldMarketDataProvider {
   readonly providerId = 'sold-comps.com';
-  // R2 (§5.1): not R0-calibrated (R0 only spiked Trawl, the provider that
-  // now takes priority in getSoldMarketDataProvider below) — reuses Trawl's
+  // R2 (§5.1): not R0-calibrated (R0 only spiked Trawl) — reuses Trawl's
   // measured maxUsefulQueryTerms as a same-shape (all_terms keyword search)
   // placeholder pending this provider's own spike, if it's ever revived.
   readonly capabilities: MarketEvidenceProviderCapabilities = {
@@ -361,16 +368,73 @@ class SoldCompsProvider implements SoldMarketDataProvider {
 // is confirmed — do not reintroduce alternate aliases.
 const SOLDCOMPS_API_KEY_ENV_NAME = 'SOLD_COMPS_API_KEY';
 const SERP_API_KEY_ENV_NAME = 'SERP_API_KEY';
+const TRAWL_API_KEY_ENV_NAME = 'TRAWL_API_KEY';
+
+class FailoverSoldProvider implements SoldMarketDataProvider {
+  readonly providerId: string;
+  readonly capabilities: MarketEvidenceProviderCapabilities;
+
+  constructor(private readonly providers: SoldMarketDataProvider[]) {
+    this.providerId = providers.map((provider) => provider.providerId).join(' -> ');
+    const primary = providers[0].capabilities;
+    this.capabilities = {
+      ...primary,
+      // The selected provider is reported on each successful result. At the
+      // planning boundary, remain conservative if any fallback lacks this.
+      suppliesBestOfferFlag: providers.every((provider) => provider.capabilities.suppliesBestOfferFlag),
+    };
+  }
+
+  async searchSoldComps(query: SoldCompsQuery): Promise<SoldEvidenceResult> {
+    const attempts: SoldProviderAttempt[] = [];
+    let lastFailure: Extract<SoldEvidenceResult, { ok: false }> | null = null;
+    for (const provider of this.providers) {
+      const startedAt = Date.now();
+      const result = await provider.searchSoldComps(query);
+      const latencyMs = Date.now() - startedAt;
+      attempts.push({
+        providerId: provider.providerId,
+        ok: result.ok,
+        reason: result.ok ? null : result.reason,
+        detail: result.ok ? null : result.detail,
+        latencyMs,
+      });
+      if (result.ok) {
+        return {
+          ...result,
+          providerId: provider.providerId,
+          suppliesBestOfferFlag: provider.capabilities.suppliesBestOfferFlag,
+          providerAttempts: attempts,
+        };
+      }
+      lastFailure = result;
+    }
+    return {
+      ...(lastFailure ?? { ok: false as const, reason: 'SOLDCOMPS_NOT_CONFIGURED' as const, detail: 'No sold-comp provider configured' }),
+      providerId: attempts.at(-1)?.providerId,
+      providerAttempts: attempts,
+    };
+  }
+}
 
 // Factory — returns null when not configured. Callers must treat null as
 // SOLDCOMPS_NOT_CONFIGURED, never silently skip to an AI estimate or a
 // fabricated value.
-// Priority: SerpAPI (SERP_API_KEY) → SoldComps (SOLD_COMPS_API_KEY) → null.
-// Trawl is deprecated and removed from the selection path (DECISIONS.md 2026-09-11).
+// Priority: SerpAPI → SoldComps → Trawl. When more than one key is configured,
+// operational failures fall through explicitly and every attempt is retained
+// in the scan audit. A successful empty search is not a failure and therefore
+// does not spend a backup-provider request.
 export function getSoldMarketDataProvider(): SoldMarketDataProvider | null {
+  const providers: SoldMarketDataProvider[] = [];
   const serpApiKey = Deno.env.get(SERP_API_KEY_ENV_NAME);
-  if (serpApiKey) return new SerpApiEbaySoldProvider(serpApiKey);
+  if (serpApiKey) providers.push(new SerpApiEbaySoldProvider(serpApiKey));
 
   const apiKey = Deno.env.get(SOLDCOMPS_API_KEY_ENV_NAME);
-  return apiKey ? new SoldCompsProvider(apiKey) : null;
+  if (apiKey) providers.push(new SoldCompsProvider(apiKey));
+
+  const trawlApiKey = Deno.env.get(TRAWL_API_KEY_ENV_NAME);
+  if (trawlApiKey) providers.push(new TrawlProvider(trawlApiKey));
+
+  if (!providers.length) return null;
+  return providers.length === 1 ? providers[0] : new FailoverSoldProvider(providers);
 }

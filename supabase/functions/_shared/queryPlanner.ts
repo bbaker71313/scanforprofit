@@ -21,6 +21,18 @@ function truncateTerms(text: string, maxTerms: number): string {
   return tokens.slice(0, Math.max(0, maxTerms)).join(' ')
 }
 
+// Keep every precision-defining token. Optional brand text is included only
+// when it fits in full; silently truncating a model/variant and retaining an
+// exact precision label would overstate the evidence match.
+function exactQuery(required: string[], optionalBrand: string, maxTerms: number): string | null {
+  const requiredTokens = required.filter(Boolean).join(' ').split(' ').filter(Boolean)
+  if (!requiredTokens.length || requiredTokens.length > maxTerms) return null
+  const brandTokens = optionalBrand.split(' ').filter(Boolean)
+  return brandTokens.length + requiredTokens.length <= maxTerms
+    ? [...brandTokens, ...requiredTokens].join(' ')
+    : requiredTokens.join(' ')
+}
+
 function dedupe(candidates: QueryCandidate[]): QueryCandidate[] {
   const seen = new Set<string>()
   const out: QueryCandidate[] = []
@@ -54,11 +66,13 @@ function planTermMatchedQueries(identity: IdentityCandidate, maxTerms: number): 
   if (identity.gtin) {
     rungs.push({ query: identity.gtin, precision: 'exact_identifier_variant' })
   }
-  if (variant) {
-    rungs.push({ query: [brand, model, variant].filter(Boolean).join(' '), precision: 'exact_model_variant' })
+  if (model && variant) {
+    const query = exactQuery([model, variant], brand, maxTerms)
+    if (query) rungs.push({ query, precision: 'exact_model_variant' })
   }
   if (model) {
-    rungs.push({ query: [brand, model].filter(Boolean).join(' '), precision: 'exact_model' })
+    const query = exactQuery([model], brand, maxTerms)
+    if (query) rungs.push({ query, precision: 'exact_model' })
   }
   for (const keyword of identity.normalizedSearchTerms) {
     const truncated = truncateTerms(keyword, maxTerms)
@@ -80,7 +94,9 @@ function planTermMatchedQueries(identity: IdentityCandidate, maxTerms: number): 
   }
 
   const truncated = rungs
-    .map((r) => ({ query: truncateTerms(r.query, maxTerms), precision: r.precision }))
+    .map((r) => r.precision === 'exact_identifier_variant' || r.precision === 'exact_model_variant' || r.precision === 'exact_model'
+      ? r
+      : { query: truncateTerms(r.query, maxTerms), precision: r.precision })
     .filter((r) => r.query.length > 0)
 
   return dedupe(truncated)

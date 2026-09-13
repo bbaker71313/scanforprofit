@@ -171,6 +171,7 @@ export type MarketDataFailureReason =
   // can say what was actually observed. Both are LIMITED EVIDENCE states —
   // never a fabricated decision.
   | 'EVIDENCE_TOO_WEAK'
+  | 'MARKETPLACE_AUTH_FAILED'
   | 'PROVIDER_TIMEOUT'
   // R1 (P1-9): split from the former single PROVIDER_RATE_LIMITED so the
   // client can honestly distinguish "retry shortly" from "the monthly
@@ -188,6 +189,7 @@ export type MarketDataFailureReason =
 // with pagination/retries can't balloon the persisted row; never logs
 // provider credentials or raw response bodies.
 export interface MarketEvidenceAuditEntry {
+  providerId?: string
   query: string
   precision: CompMatchPrecision
   rawCompCount: number
@@ -227,6 +229,7 @@ export interface MarketDataSuccess {
   identity: IdentityCandidate
   catalogMatch: CatalogMatch | null
   category: CategoryResolution | null
+  soldProviderId?: string | null
   metrics: MarketMetrics
   audit?: MarketEvidenceAudit
 }

@@ -3612,7 +3612,7 @@ function createInventoryItem(data) {
   const roi       = data.roi   !== undefined ? data.roi   : (cost > 0 ? Math.round((profit/cost)*100) : null);
 
   const newItem = {
-    id:              Date.now(),
+    id:              data.id ?? Date.now(),
     sku,
     nickname:        data.nickname  || data.title || 'Unnamed Item',
     title:           data.title     || data.nickname || 'Unnamed Item',
@@ -3637,7 +3637,7 @@ function createInventoryItem(data) {
 
   items = [...items, newItem];
   saveItems();
-  pushItemToServer(newItem); // sync to server in background
+  if (!data.skipServerSync) pushItemToServer(newItem); // sync to server in background
   populatePaDropdown();
   updateStaleBadge();
   logActivity('', `Added "${newItem.nickname}" to inventory (${newItem.sku})`);
@@ -6001,6 +6001,19 @@ async function stitchPhotos(files) {
 // left it blank, a number when they entered one — never invented here or on
 // the server. Sent as a string over the wire; the server treats blank/null/
 // malformed identically as "unknown" and never conflates that with a typed 0.
+async function scanFetch(url, options) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
+  try {
+    return await apiFetch(url, {...options, signal: controller.signal});
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('Scan timed out. Please try again.');
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function callScan(type, hint, imageB64, acquisitionCost) {
   if (!isUnlocked()) throw new Error('Not logged in. Check your email for the login link.');
   if (!imageB64 && !imgFile) throw new Error('No photo selected');
@@ -6011,7 +6024,7 @@ async function callScan(type, hint, imageB64, acquisitionCost) {
     const body = { type, imageBase64: imageB64 };
     if (hint) body.hint = hint;
     if (acquisitionCost !== null && acquisitionCost !== undefined) body.acquisitionCost = acquisitionCost;
-    res = await apiFetch(API_BASE, {
+    res = await scanFetch(API_BASE, {
       method: 'POST',
       headers: getApiHeaders(),
       body: JSON.stringify(body),
@@ -6028,7 +6041,7 @@ async function callScan(type, hint, imageB64, acquisitionCost) {
     for (const k in baseHeaders) {
       if (k.toLowerCase() !== 'content-type') headers[k] = baseHeaders[k];
     }
-    res = await apiFetch(API_BASE, {
+    res = await scanFetch(API_BASE, {
       method: 'POST',
       headers: headers,
       body: fd,
@@ -6109,7 +6122,7 @@ async function analyze() {
       r = await callScan('single_scan', hint, undefined, acquisitionCost);
     } else {
       // Text-only scan: typed text_scan handler
-      const txRes = await apiFetch(API_BASE, {
+      const txRes = await scanFetch(API_BASE, {
         method: 'POST', headers: getApiHeaders(),
         body: JSON.stringify({ type: 'text_scan', hint: txt, acquisitionCost })
       });
@@ -6124,12 +6137,8 @@ async function analyze() {
     // rendering a malformed decision/profit if the response shape is wrong.
     const normalized = ScanResultContract.normalizeSingleScanResult(r);
     const item = normalized.item, dec = normalized.dec, fin = normalized.fin;
-    logScan(dec, fin.roi, normalized.cost||0, false); // P2-31: preserve fin.roi's null (server-authoritative) — do not coerce to 0
-    try {
-      const scanLog=JSON.parse(localStorage.getItem('sfp_scan_log')||'[]');
-      if(scanLog.length){scanLog[0].name=item.item_name;scanLog[0].potentialProfit=fin.profit;localStorage.setItem('sfp_scan_log',JSON.stringify(scanLog));}
-    } catch(_){}
-    renderSingle({item, cost:normalized.cost, fin, dec, maxBuyPrice:normalized.maxBuyPrice, maxBuyPriceLimitedBy:normalized.maxBuyPriceLimitedBy, marketDataSource:normalized.marketDataSource, decisionReasons:normalized.decisionReasons, decisionAvailable:normalized.decisionAvailable, decisionStatus:normalized.decisionStatus, unavailableReason:normalized.unavailableReason, noEvidenceReason:normalized.noEvidenceReason, evidenceQuality:normalized.evidenceQuality, compMatchPrecision:normalized.compMatchPrecision, suggestedSearchQuery:normalized.suggestedSearchQuery, bestMarketplace:normalized.bestMarketplace, bestMarketplaceLabel:normalized.bestMarketplaceLabel, whyThisMarketplace:normalized.whyThisMarketplace, alternativeMarketplaces:normalized.alternativeMarketplaces});
+    logScan(dec, fin.roi, normalized.cost, false, {name:item.item_name, potentialProfit:fin.profit, scanLogId:normalized.scanLogId});
+    renderSingle({item, cost:normalized.cost, fin, dec, maxBuyPrice:normalized.maxBuyPrice, maxBuyPriceLimitedBy:normalized.maxBuyPriceLimitedBy, marketDataSource:normalized.marketDataSource, decisionReasons:normalized.decisionReasons, decisionAvailable:normalized.decisionAvailable, decisionStatus:normalized.decisionStatus, unavailableReason:normalized.unavailableReason, noEvidenceReason:normalized.noEvidenceReason, evidenceQuality:normalized.evidenceQuality, compMatchPrecision:normalized.compMatchPrecision, suggestedSearchQuery:normalized.suggestedSearchQuery, bestMarketplace:normalized.bestMarketplace, bestMarketplaceLabel:normalized.bestMarketplaceLabel, whyThisMarketplace:normalized.whyThisMarketplace, alternativeMarketplaces:normalized.alternativeMarketplaces, scanLogId:normalized.scanLogId});
     renderScanHistory();
   } catch(e){resetBtn('analyze-btn','Run Profit Scanner','green');showError('Error: '+(e.message||'Try again.'));}
 }
@@ -6208,7 +6217,7 @@ function renderAlternativeMarketplaces(alts) {
   const rows = alts.map(a => {
     const range = (a.price_low != null && a.price_high != null) ? `$${Number(a.price_low).toFixed(0)}–$${Number(a.price_high).toFixed(0)}` : `$${Number(a.expected_sale_price).toFixed(0)}`;
     const status = a.qualifies ? '' : ' — does not meet your targets';
-    return `<div class="data-row"><span class="dl">${escHtml(a.label)}</span><span class="dv u-text-sm">${range} asking · ${escHtml(a.evidence_quality)} evidence${status}</span></div>`;
+    return `<div class="data-row"><span class="dl">${escHtml(a.label)}</span><span class="dv u-text-sm">${range} market range · ${escHtml(a.evidence_quality)} evidence${status}</span></div>`;
   }).join('');
   return `<div class="card"><h3 class="card-title">Other Options</h3>${rows}</div>`;
 }
@@ -6220,6 +6229,8 @@ function renderAlternativeMarketplaces(alts) {
 // in claude-proxy/index.ts and VALID_UNAVAILABLE_REASONS in
 // scanResultContract.js exactly.
 const UNAVAILABLE_REASON_COPY = {
+  PROVIDER_TIMEOUT: 'Market data took too long to respond. Try again shortly.',
+  MALFORMED_PROVIDER_RESPONSE: 'Market data returned an invalid response. Try again shortly.',
   PROVIDER_THROTTLED: 'Market data is busy right now. Try again in a few seconds.',
   PROVIDER_QUOTA_EXHAUSTED: "Market data is unavailable today. We're on it.",
   PROVIDER_UNAVAILABLE: 'Market data is temporarily unavailable. Try again shortly.',
@@ -6252,8 +6263,8 @@ function noEvidenceReasonCopy(reason) {
 // decision at all) and from the normal renderSingle path (real
 // profit/ROI-gated economics). No [ VERIFIED ] claim, no profit/ROI shown —
 // there is genuinely nothing defensible to show.
-function renderNoMarketSupportSkip({item, cost, suggestedSearchQuery, noEvidenceReason}) {
-  lastSingleResult = {item, cost, fin: {profit:null, roi:null, fee:null, shipCost:null}, dec:'SKIP'};
+function renderNoMarketSupportSkip({item, cost, suggestedSearchQuery, noEvidenceReason, scanLogId}) {
+  lastSingleResult = {item, cost, fin: {profit:null, roi:null, fee:null, shipCost:null}, dec:'SKIP', scanLogId};
   const costKnown = cost !== null && cost !== undefined;
   const soldSearchQuery = suggestedSearchQuery || (item.search_keywords && item.search_keywords[0]) || item.item_name || '';
   const soldSearchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(soldSearchQuery)}&LH_Sold=1&LH_Complete=1`;
@@ -6297,11 +6308,11 @@ function renderNoMarketSupportSkip({item, cost, suggestedSearchQuery, noEvidence
 // claude-proxy/index.ts). This is an evidence state, not a sourcing
 // decision — identification is still shown, no AI-created numerical market
 // values are shown.
-function renderInsufficientEvidence({item,cost,suggestedSearchQuery,unavailableReason}) {
+function renderInsufficientEvidence({item,cost,suggestedSearchQuery,unavailableReason,scanLogId}) {
   // Buy/showBuyConfirm already render null fin.profit/fin.roi/item.avg_sold_price
   // as "—"/blank, so the manual add-to-inventory flow works the same as the
   // verified path — the user can still add it and price it themselves.
-  lastSingleResult = {item, cost, fin: {profit:null, roi:null, fee:null, shipCost:null}, dec:null};
+  lastSingleResult = {item, cost, fin: {profit:null, roi:null, fee:null, shipCost:null}, dec:null, scanLogId};
   const costKnown = cost !== null && cost !== undefined;
   const soldSearchQuery = suggestedSearchQuery || (item.search_keywords && item.search_keywords[0]) || item.item_name || '';
   const soldSearchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(soldSearchQuery)}&LH_Sold=1&LH_Complete=1`;
@@ -6341,21 +6352,21 @@ function renderInsufficientEvidence({item,cost,suggestedSearchQuery,unavailableR
   showSrcView('results');
 }
 
-function renderSingle({item,cost,fin,dec,maxBuyPrice,maxBuyPriceLimitedBy,marketDataSource,decisionReasons,decisionAvailable,decisionStatus,unavailableReason,noEvidenceReason,evidenceQuality,compMatchPrecision,suggestedSearchQuery,bestMarketplace,bestMarketplaceLabel,whyThisMarketplace,alternativeMarketplaces}) {
+function renderSingle({item,cost,fin,dec,maxBuyPrice,maxBuyPriceLimitedBy,marketDataSource,decisionReasons,decisionAvailable,decisionStatus,unavailableReason,noEvidenceReason,evidenceQuality,compMatchPrecision,suggestedSearchQuery,bestMarketplace,bestMarketplaceLabel,whyThisMarketplace,alternativeMarketplaces,scanLogId}) {
   resetBtn('analyze-btn','Run Profit Scanner','green');
-  if (decisionAvailable === false) { renderInsufficientEvidence({item, cost, suggestedSearchQuery, unavailableReason}); return; }
+  if (decisionAvailable === false) { renderInsufficientEvidence({item, cost, suggestedSearchQuery, unavailableReason, scanLogId}); return; }
   // R3 (item L): a real SKIP with genuinely zero market support — distinct
   // from both the insufficient-evidence state above and the normal
   // profit/ROI-based render below (which has no financial basis to show).
-  if (decisionStatus === 'ok_no_evidence') { renderNoMarketSupportSkip({item, cost, suggestedSearchQuery, noEvidenceReason}); return; }
-  lastSingleResult = {item,cost,fin,dec};
+  if (decisionStatus === 'ok_no_evidence') { renderNoMarketSupportSkip({item, cost, suggestedSearchQuery, noEvidenceReason, scanLogId}); return; }
+  lastSingleResult = {item,cost,fin,dec,bestMarketplace,bestMarketplaceLabel,scanLogId};
   const{profit,roi,fee}=fin;
   const costKnown = cost !== null && cost !== undefined;
   const shipLine=(fin.shipCost>0)
     ?`<span class="dv u-neg">-$${fin.shipCost.toFixed(2)}</span>`
     :`<span class="dv u-pos" style="font-weight:800">Buyer Pays</span>`;
   const D_ICON={HOT:'[ HOT ]',LIST:'[ LIST ]',SKIP:'[ SKIP ]'};
-  const D_LBL={HOT:'HIGH DEMAND: BUY NOW',LIST:'WORTH LISTING',SKIP:'SKIP THIS ONE'};
+  const D_LBL={HOT:'STRONG OPPORTUNITY',LIST:'WORTH LISTING',SKIP:'SKIP THIS ONE'};
   const kw=(item.search_keywords||[]).map(k=>`<a href="https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(k)}&LH_Sold=1&LH_Complete=1" target="_blank" class="tag">${escHtml(k)} ↗</a>`).join('');
   const tips=(item.listing_tips||[]).map(t=>`<li class="tip-item"><span class="tip-arrow">→</span>${escHtml(t)}</li>`).join('');
   const flags=(item.risk_flags||[]).filter(Boolean).map(f=>`<li class="tip-item u-neg"><span class="tip-arrow u-neg">!</span>${escHtml(f)}</li>`).join('');
@@ -6408,7 +6419,7 @@ function renderSingle({item,cost,fin,dec,maxBuyPrice,maxBuyPriceLimitedBy,market
       <div class="data-row"><span class="dl">Price Range</span><span class="dv">$${escHtml(item.price_low)} – $${escHtml(item.price_high)}</span></div>
       <hr class="divider">
       <div class="data-row"><span class="dl">Your Cost</span><span class="dv">${costKnown?`$${cost.toFixed(2)}`:'Not entered'}</span></div>
-      <div class="data-row"><span class="dl">eBay Fee (${S.ebayFee}%)</span><span class="dv u-neg">-$${fee.toFixed(2)}</span></div>
+      <div class="data-row"><span class="dl">${escHtml(bestMarketplaceLabel || 'Marketplace')} Fees</span><span class="dv u-neg">-$${fee.toFixed(2)}</span></div>
       <div class="data-row"><span class="dl">Packaging</span><span class="dv u-neg">-$${S.pkgCost.toFixed(2)}</span></div>
       <div class="data-row"><span class="dl">Shipping</span>${shipLine}</div>
       <hr class="divider">
@@ -6471,17 +6482,27 @@ function mapToInvCategory(aiCat) {
   return 'Electronics'; // default
 }
 
-function logScan(dec, roi, cost, bought) {
+function logScan(dec, roi, cost, bought, meta) {
   // Instructions now always visible
   // P2-31: preserve null roi (genuine $0/unknown cost) — never coerce to a
   // fabricated 0%, which would be indistinguishable from a real break-even scan.
   const roiVal = (roi === null || roi === undefined) ? null : roi;
   const log = JSON.parse(localStorage.getItem('sfp_scan_log')||'[]');
-  log.push({ ts: Date.now(), dec, roi: roiVal, cost: cost||0, bought: !!bought });
+  log.push({ ts: Date.now(), dec, roi: roiVal, cost: cost ?? null, bought: !!bought, ...(meta||{}) });
   // Keep last 500 scans
   if (log.length > 500) log.splice(0, log.length - 500);
   localStorage.setItem('sfp_scan_log', JSON.stringify(log));
-  if (window.posthog) posthog.capture('scan_complete', { decision: dec, roi: roiVal, cost: cost||0, bought: !!bought });
+  if (window.posthog) posthog.capture('scan_complete', { decision: dec, roi: roiVal, cost: cost ?? null, bought: !!bought });
+}
+
+function markLocalScanBought(scanLogId, potentialProfit, cost) {
+  const log = JSON.parse(localStorage.getItem('sfp_scan_log')||'[]');
+  const row = scanLogId != null ? log.find(s => s.scanLogId === scanLogId) : [...log].reverse().find(s => !s.bought);
+  if (!row) return;
+  row.bought = true;
+  row.potentialProfit = potentialProfit;
+  row.cost = cost ?? null;
+  localStorage.setItem('sfp_scan_log', JSON.stringify(log));
 }
 
 function buyItem() {
@@ -6490,12 +6511,9 @@ function buyItem() {
     const {item, cost, fin, dec} = lastSingleResult;
     // Log scan name for history
     const scanLog = JSON.parse(localStorage.getItem('sfp_scan_log')||'[]');
-    if (scanLog.length && !scanLog[0].name) {
-      scanLog[0].name = item.item_name;
-      scanLog[0].potentialProfit = fin.profit;
-      localStorage.setItem('sfp_scan_log', JSON.stringify(scanLog));
-    }
-    showBuyConfirm(item, cost, fin, dec);
+    const latest = [...scanLog].reverse().find(s => !s.name);
+    if (latest) { latest.name = item.item_name; latest.potentialProfit = fin.profit; localStorage.setItem('sfp_scan_log',JSON.stringify(scanLog)); }
+    showBuyConfirm(item, cost, fin, dec, lastSingleResult);
   } catch(e) {
     showToast('Error: ' + (e.message || 'Could not open confirmation'));
     console.error('buyItem error:', e);
@@ -6509,7 +6527,6 @@ let currentShelfItems = []; // Global cache for shelf items
 
 function renderShelf(shelfItems) {
   resetBtn('shelf-btn','Rank This Shelf','purple');
-  currentShelfItems = shelfItems; // Cache for buy button clicks
   const hot=shelfItems.filter(i=>i.decision==='HOT');
   const list=shelfItems.filter(i=>i.decision==='LIST');
   const skip=shelfItems.filter(i=>i.decision==='SKIP');
@@ -6517,6 +6534,9 @@ function renderShelf(shelfItems) {
   // marketplace evidence gets decision:null — it is neither a real SKIP nor
   // ranked alongside HOT/LIST, just honestly called out (task doc §4, §19).
   const limitedEvidence=shelfItems.filter(i=>i.decision===null);
+  // The buttons below use grouped display indexes; cache that exact order so
+  // a click can never resolve to a different item from the original array.
+  currentShelfItems = [...hot, ...list, ...skip, ...limitedEvidence];
   const icon={HOT:'',LIST:'',SKIP:'',LIMITED:'?'};
   // Short labels for a compact shelf card — same failingThresholds source as
   // the single-scan explanation, phrased for a not-yet-purchased item (no
@@ -6770,8 +6790,8 @@ function fabQuickAdd() {
 // ══════════════════════════════════════════════════
 let pendingBuyData = null;
 
-function showBuyConfirm(item, cost, fin, dec) {
-  pendingBuyData = {item, cost, fin, dec};
+function showBuyConfirm(item, cost, fin, dec, scanContext) {
+  pendingBuyData = {item, cost, fin, dec, ...(scanContext||{})};
 
   // Photo — only show preview if this was a single-item scan; shelf
   // scans show a photo of many items, which would be misleading here.
@@ -6816,9 +6836,9 @@ function closeBuyConfirm() {
   pendingBuyData = null;
 }
 
-function confirmBuyItem() {
+async function confirmBuyItem() {
   if (!pendingBuyData) return;
-  const {item, fin, dec} = pendingBuyData;
+  const {item, fin, dec, scanLogId, bestMarketplace, bestMarketplaceLabel} = pendingBuyData;
   const name     = document.getElementById('bc-name').value.trim() || item.item_name;
   const category = document.getElementById('bc-category').value;
   const condition= document.getElementById('bc-condition').value;
@@ -6841,12 +6861,41 @@ function confirmBuyItem() {
   // NOTE: do not use srcMode here — it's a global that persists between scans and
   // would incorrectly attach shelf photos if a single scan was run previously.
   const photos   = [];
-  logScan(dec, fin.roi, cost, true);
+  const originalCost = pendingBuyData.cost;
+  const originalSell = Number(item.avg_sold_price);
+  const economicsUnchanged = originalCost != null && Number(originalCost) === cost && Number.isFinite(originalSell) && originalSell === sellPrice;
+  const savedProfit = economicsUnchanged ? fin.profit : null;
+  const savedRoi = economicsUnchanged ? fin.roi : null;
+  let serverInventoryId = null;
+  if (scanLogId != null && isUnlocked()) {
+    try {
+      const response = await apiFetch(API_BASE, {
+        method:'POST', headers:getApiHeaders(),
+        body:JSON.stringify({
+          type:'buy_item', scanLogId, itemName:name, category, cost, sellPrice,
+          estimatedProfit:savedProfit, roi:savedRoi,
+          platform:bestMarketplaceLabel || bestMarketplace || 'eBay',
+          sourcingMeta:{
+            avg_sold_price:item.avg_sold_price, price_low:item.price_low, price_high:item.price_high,
+            confidence:item.confidence, decision:dec, best_marketplace:bestMarketplace,
+            scanned_at:new Date().toISOString(),
+          },
+        }),
+      });
+      if (!response.ok) throw new Error((await response.json().catch(()=>({}))).error || 'Could not save item');
+      serverInventoryId = (await response.json()).inventoryId;
+    } catch (error) {
+      showToast(error.message || 'Could not save item');
+      return;
+    }
+  }
+  markLocalScanBought(scanLogId, savedProfit, cost);
   const newItem = createInventoryItem({
     nickname: name, title: name, category, condition,
-    platform: 'eBay', cost: cost.toString(),
+    id: serverInventoryId, skipServerSync: serverInventoryId != null,
+    platform: bestMarketplaceLabel || bestMarketplace || 'eBay', cost: cost.toString(),
     estimated_value: sellPrice, sellPrice: sellPrice > 0 ? sellPrice.toFixed(2) : '',
-    profit: calcProfit(cost, sellPrice), roi: cost > 0 ? Math.round((calcProfit(cost,sellPrice)/cost)*100) : null, // P2-31: never fabricate 0% ROI for a $0 cost
+    profit: savedProfit, roi: savedRoi,
     status: 'Unlisted', notes, photos, image_url: photos[0]||null,
     created_from: 'sourcing',
     sourcing_meta: {
@@ -7018,7 +7067,7 @@ function renderScanHistory() {
     el.innerHTML = '<div style="text-align:center;padding:20px 16px;color:var(--muted);font-size:12px;line-height:1.6">Your scan history will appear here.<br>Scan an item above to get started.</div>';
     return;
   }
-  const todayScans = log.filter(s=>new Date(s.ts).toDateString()===today).slice(0,5);
+  const todayScans = log.filter(s=>new Date(s.ts).toDateString()===today).sort((a,b)=>b.ts-a.ts).slice(0,5);
   if (!todayScans.length) { el.style.display='none'; return; }
   el.style.display = 'block';
   const totalPotentialProfit = todayScans.filter(s=>s.bought).reduce((a,s)=>a+(s.potentialProfit||0),0);

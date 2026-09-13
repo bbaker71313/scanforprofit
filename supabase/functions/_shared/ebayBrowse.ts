@@ -36,7 +36,7 @@ export interface BrowseSearchParams {
 // the P0 defect that let a failed Browse lookup masquerade as "zero
 // competition", inflating STR to 100% and turnover to 0 days downstream in
 // marketDataPipeline.ts/marketMetrics.ts.
-export async function searchActiveListings(params: BrowseSearchParams): Promise<ActiveMarketEvidence | null> {
+export async function searchActiveListings(params: BrowseSearchParams): Promise<ActiveMarketEvidence> {
   try {
     const token = await getEbayAppAccessToken();
     const qs = new URLSearchParams({ q: params.query, limit: String(params.limit ?? 20) });
@@ -52,12 +52,9 @@ export async function searchActiveListings(params: BrowseSearchParams): Promise<
       { headers: { Authorization: `Bearer ${token}`, 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' } },
       { timeoutMs: 10_000, maxRetries: 2 },
       (r) => r.json() as Promise<{ itemSummaries?: BrowseItemSummary[]; total?: number }>,
-    ).catch(() => null);
-    // externalCall failed (HTTP error / timeout / rate limit after retries) or
-    // the body wasn't valid JSON — active count is unknown, not zero.
-    if (!data) return null;
+    );
     const items = data.itemSummaries ?? [];
-    if (!Array.isArray(items)) return null; // malformed provider response
+    if (!Array.isArray(items)) throw new Error('Malformed eBay Browse response');
 
     const sampledListings: ActiveListingSummary[] = items
       .filter(i => i.itemId && i.price?.value)
@@ -92,6 +89,6 @@ export async function searchActiveListings(params: BrowseSearchParams): Promise<
     };
   } catch (err) {
     if (err instanceof EbayAppAuthError) throw err;
-    return null; // unexpected failure — unknown, never a fabricated zero
+    throw err; // preserve operational failure for the market-data authority gate
   }
 }

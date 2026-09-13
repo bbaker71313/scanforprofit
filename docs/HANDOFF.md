@@ -6,6 +6,58 @@ Update it at the end of every Claude Code session with what changed.
 
 ---
 
+## Session: 2026-09-13 — Scanner audit remediation and production proof
+
+**Outcome:** The audited scanner path is repaired, deployed, and verified with
+an authenticated production text scan. The final live function is
+`claude-proxy` **v119**. GitHub PR #161 contains the remediation; its final
+scanner-code commit is `7c97a08`.
+
+**Primary production failure:** SerpAPI's eBay engine accepted the correct
+`engine=ebay&show_only=Sold` request but its eBay scrape ended in provider 503
+after roughly 90 seconds. The old single-provider path converted that outage
+into `LIMITED EVIDENCE`, even though a working SoldComps credential was already
+configured.
+
+**Changes:**
+- Added explicit, audited sold-provider failover: SerpAPI → SoldComps → Trawl.
+  Only operational failures fall through; a successful empty result does not.
+  Every provider attempt, failure reason, and latency is persisted.
+- Corrected SerpAPI async submit/poll handling and bounded timeouts, preserved
+  missing sold dates outside velocity math, and prevented ambiguous price
+  ranges or Best Offer uncertainty from overstating evidence.
+- Corrected exact-model query planning, identity merge rules, comparable
+  filtering, provider failure classification, active-zero handling, and
+  real-provider attribution.
+- Removed AI price/comp instructions from the text-identification prompt;
+  authoritative economics still come only from verified marketplace evidence.
+- Repaired scan response/client contracts, truthful unavailable messages,
+  image validation/timeouts, pre-quota input validation, shelf call budgets,
+  and scan-to-inventory idempotency/ownership behavior.
+- Fixed the final production-only truth-label issue: sold-only evidence no
+  longer claims that active-market data also participated.
+
+**Production proof (temporary scan id 79, deleted after verification):**
+- Exact item: General Electric GE Superadio III, model 7-2887; confidence 97.
+- SerpAPI failure recorded, then SoldComps returned 40 records; six coherent
+  exact-model-variant comps qualified.
+- Verified sold range $29.99–$37.99; median/expected sale price $33.99.
+- At $2.99 entered cost, 13% eBay fee, $1.25 packaging, and buyer-paid
+  shipping: independently recomputed profit $25.33 and ROI 847.20%.
+- Result: `HOT`, `decisionAvailable:true`, `evidenceQuality:strong`, source
+  exactly `eBay sold listings (sold-comps.com)`. eBay active count was zero and
+  was not represented as active evidence.
+
+**Validation:** 349 Deno backend tests, 70 shared-engine tests, 49 browser
+contract tests, shared/web TypeScript checks, and `git diff --check` all pass.
+Supabase v119 is ACTIVE. The temporary smoke-test account and all five of its
+scan rows were cascade-deleted and verified absent from every referencing
+table.
+
+**Migrations:** None. **Blockers:** None.
+
+---
+
 ## Session: 2026-09-13 — Claude context-window startup fix
 
 **Root cause:** Every Claude session was required to preload `CLAUDE.md`,
@@ -109,27 +161,5 @@ the decisionAudit for each attempted query.
 **Blockers:** Cannot run a live production scan from a remote session (egress
 proxy blocks direct calls to `*.supabase.co`). The product owner must run the
 verification scan from `scanforprofit.com/app.html`.
-
----
-
-## Session: 2026-09-11 — SerpAPI replaces Trawl as primary eBay sold-history provider
-
-**Summary:** Replaced Trawl with SerpAPI (`engine=ebay&show_only=Sold`) as the primary eBay sold-data provider per executive directive. `SERP_API_KEY` (already configured in Supabase for Google Lens identification) is now reused for sold searches — no new credential needed.
-
-**Provider priority after this session:** `SERP_API_KEY` → `SOLD_COMPS_API_KEY` → null. `TRAWL_API_KEY` is deprecated and no longer in the selection path.
-
-**Files changed:**
-- `supabase/functions/_shared/serpApiEbaySoldProvider.ts` — NEW. `SerpApiEbaySoldProvider` class + `parseSerpApiSoldItem()` parser (exported for tests). Uses `externalCall` with 12s timeout, 1 retry, Retry-After-aware `shouldRetry`.
-- `supabase/functions/_shared/serpApiEbaySoldProvider_test.ts` — NEW. 28 tests covering parser variants, transport error cases, and GE radio regression.
-- `supabase/functions/_shared/soldCompsProvider.ts` — Added `import { SerpApiEbaySoldProvider }`. Exported `TrawlProvider` class (deprecated, kept for rollback). Updated `getSoldMarketDataProvider()` factory: SerpAPI → SoldComps → null. Replaced `TRAWL_API_KEY_ENV_NAME` with `SERP_API_KEY_ENV_NAME`.
-- `supabase/functions/_shared/soldCompsProvider_test.ts` — Added `TrawlProvider` import. Updated `trawlProvider()` helper to construct directly (no longer uses factory). Overhauled `withEnv` to support clearing keys. Added 4 factory selection tests.
-- `supabase/functions/_shared/marketDataPipeline.ts` — Updated `SOLDCOMPS_NOT_CONFIGURED` error detail string (TRAWL_API_KEY → SERP_API_KEY).
-- `docs/files/DECISIONS.md` — Replaced "Trawl is the preferred sold-history provider" with "SerpAPI is the primary eBay sold-history provider" (decision date 2026-09-11).
-
-**Tests:** 52/52 pass (28 new SerpAPI provider tests + all 24 existing soldCompsProvider tests).
-
-**Next task:** Deploy the updated `claude-proxy` / `_shared` Edge Functions to Supabase production so the live scanner uses SerpAPI. Then run a production replay: scan 1 item and confirm the scan log shows a `serpapi.com/ebay` provider in the evidence audit. No code changes needed — the key is already in Supabase secrets.
-
-**Decision preserved:** `SERP_API_KEY` must never be exposed client-side. All SerpAPI calls go through Edge Functions only.
 
 ---

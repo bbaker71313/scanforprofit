@@ -11,14 +11,49 @@
 // verified_transaction evidence unless it carries an unsold_date field
 // (explicit signal that the listing ended without a buyer). A missing
 // sold_date is not a rejection reason — eBay's own sold-filter guarantees
-// the item sold; we fall back to today's date for display/audit purposes only.
+// the item sold; an unknown date is kept outside recent-velocity metrics.
 import type { SoldCompListing, MarketDataFailureReason } from "./marketData.ts"
 import type { MarketEvidenceProviderCapabilities } from "./marketplaceTypes.ts"
 import type { SoldMarketDataProvider, SoldCompsQuery, SoldEvidenceResult } from "./soldCompsProvider.ts"
 import { externalCall, ExternalCallError } from "./externalCall.ts"
 
 const SERP_API_BASE_URL = 'https://serpapi.com/search.json';
-const REQUEST_TIMEOUT_MS = 12_000;
+const REQUEST_TIMEOUT_MS = 10_000;
+const RESULT_WAIT_MS = 40_000;
+const RESULT_POLL_MS = 1_000;
+
+function searchStatus(data: Record<string, unknown>): string | null {
+  const value = (data.search_metadata as Record<string, unknown> | undefined)?.status;
+  return typeof value === 'string' ? value : null;
+}
+
+async function waitForSearchResult(
+  submitted: Record<string, unknown>,
+  apiKey: string,
+): Promise<Record<string, unknown> | SoldEvidenceResult> {
+  let data = submitted;
+  let status = searchStatus(data);
+  if (status !== 'Queued' && status !== 'Processing') return data;
+
+  const id = (data.search_metadata as Record<string, unknown> | undefined)?.id;
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+    return { ok: false, reason: 'MALFORMED_PROVIDER_RESPONSE', detail: 'SerpAPI async search did not return a valid search id' };
+  }
+
+  const deadline = Date.now() + RESULT_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, RESULT_POLL_MS));
+    data = await externalCall<Record<string, unknown>>(
+      `https://serpapi.com/searches/${id}.json?api_key=${encodeURIComponent(apiKey)}`,
+      { method: 'GET' },
+      { timeoutMs: REQUEST_TIMEOUT_MS, maxRetries: 0, isIdempotent: true },
+      (res) => res.json() as Promise<Record<string, unknown>>,
+    );
+    status = searchStatus(data);
+    if (status !== 'Queued' && status !== 'Processing') return data;
+  }
+  return { ok: false, reason: 'PROVIDER_TIMEOUT', detail: `SerpAPI eBay sold search did not finish within ${RESULT_WAIT_MS}ms` };
+}
 
 function numLike(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
@@ -39,6 +74,12 @@ function extractPrice(priceObj: unknown): number | null {
   if (typeof priceObj !== 'object' || priceObj === null) return null;
   const p = priceObj as Record<string, unknown>;
   return numLike(p.extracted) ?? numLike(p.extracted_value);
+}
+
+function isAmbiguousRange(priceObj: unknown): boolean {
+  if (typeof priceObj !== 'object' || priceObj === null) return false;
+  const p = priceObj as Record<string, unknown>;
+  return typeof p.from === 'object' || typeof p.to === 'object';
 }
 
 // Parses one raw SerpAPI eBay organic_results entry into a SoldCompListing.
@@ -77,15 +118,15 @@ export function parseSerpApiSoldItem(raw: unknown): SoldCompListing | null {
   if (!itemId) return null;
 
   // Sold date: parse human-readable "Aug 15, 2026" or ISO "2026-08-15".
-  // Falls back to today when absent/unparseable — the show_only=Sold filter
-  // guarantees the item sold recently; the exact date is display-only.
+  // Preserve an unknown date as epoch. This keeps a real sold price usable
+  // for valuation while ensuring it cannot enter the 90-day velocity window.
   let endedAt: string;
   const rawDate = str(r.sold_date);
   if (rawDate) {
     const ts = Date.parse(rawDate);
-    endedAt = Number.isNaN(ts) ? new Date().toISOString() : new Date(ts).toISOString();
+    endedAt = Number.isNaN(ts) ? new Date(0).toISOString() : new Date(ts).toISOString();
   } else {
-    endedAt = new Date().toISOString();
+    endedAt = new Date(0).toISOString();
   }
 
   return {
@@ -121,9 +162,13 @@ function mapSerpApiEbayError(err: unknown): SoldEvidenceResult {
       };
     }
     if (err.kind === 'http' && err.status === 429) {
-      return err.retryAfterMs !== undefined
-        ? { ok: false, reason: 'PROVIDER_THROTTLED', detail: `SerpAPI rate limit; retry after ${Math.ceil(err.retryAfterMs / 1000)}s` }
-        : { ok: false, reason: 'PROVIDER_QUOTA_EXHAUSTED', detail: 'SerpAPI monthly search quota exhausted' };
+      return {
+        ok: false,
+        reason: 'PROVIDER_THROTTLED',
+        detail: err.retryAfterMs !== undefined
+          ? `SerpAPI rate limit; retry after ${Math.ceil(err.retryAfterMs / 1000)}s`
+          : 'SerpAPI rate or throughput limit reached',
+      };
     }
     const status = err.status !== undefined ? `${err.status} ` : '';
     return { ok: false, reason: 'SOLDCOMPS_UNAVAILABLE', detail: `SerpAPI eBay ${status}${err.bodyText ?? err.message}`.slice(0, 500) };
@@ -150,18 +195,19 @@ export class SerpApiEbaySoldProvider implements SoldMarketDataProvider {
       engine: 'ebay',
       _nkw: query.searchTerms,
       show_only: 'Sold',    // verified sold items only — NOT "Complete" (includes unsold)
+      async: 'true',        // submit quickly, then poll Search Archive below
       api_key: this.apiKey,
       // No no_cache=true: SerpAPI's default caching is acceptable for sold data
       // and reduces cost (cached results are free).
     });
 
     try {
-      const data = await externalCall<Record<string, unknown>>(
+      const submitted = await externalCall<Record<string, unknown>>(
         `${SERP_API_BASE_URL}?${qs.toString()}`,
         { method: 'GET' },
         {
           timeoutMs: REQUEST_TIMEOUT_MS,
-          maxRetries: 1,
+          maxRetries: 0,
           isIdempotent: true,
           shouldRetry: (error, retryAfterMs) => {
             if (error.kind === 'http') {
@@ -174,9 +220,13 @@ export class SerpApiEbaySoldProvider implements SoldMarketDataProvider {
         (res) => res.json() as Promise<Record<string, unknown>>,
       );
 
-      const searchStatus = (data.search_metadata as Record<string, unknown> | undefined)?.status;
-      if (searchStatus !== 'Success') {
-        const errorDetail = str(data.error) ?? `SerpAPI reported status: ${String(searchStatus ?? 'unknown')}`;
+      const awaited = await waitForSearchResult(submitted, this.apiKey);
+      if ((awaited as { ok?: unknown }).ok === false) return awaited as SoldEvidenceResult;
+      const data = awaited as Record<string, unknown>;
+
+      const finalStatus = searchStatus(data);
+      if (finalStatus !== 'Success') {
+        const errorDetail = str(data.error) ?? `SerpAPI reported status: ${String(finalStatus ?? 'unknown')}`;
         if (typeof data.error === 'string' && data.error.toLowerCase().includes('quota')) {
           return { ok: false, reason: 'PROVIDER_QUOTA_EXHAUSTED', detail: data.error };
         }
@@ -186,7 +236,12 @@ export class SerpApiEbaySoldProvider implements SoldMarketDataProvider {
       const rawResults = Array.isArray(data.organic_results) ? data.organic_results as unknown[] : [];
       const comps = rawResults.map(parseSerpApiSoldItem).filter((c): c is SoldCompListing => c !== null);
 
-      if (rawResults.length > 0 && comps.length === 0) {
+      const safelyUnusable = rawResults.length > 0 && rawResults.every((raw) => {
+        if (typeof raw !== 'object' || raw === null) return false;
+        const row = raw as Record<string, unknown>;
+        return isAmbiguousRange(row.price);
+      });
+      if (rawResults.length > 0 && comps.length === 0 && !safelyUnusable) {
         return {
           ok: false, reason: 'MALFORMED_PROVIDER_RESPONSE',
           detail: 'SerpAPI eBay returned results but none matched the expected sold-item field contract',

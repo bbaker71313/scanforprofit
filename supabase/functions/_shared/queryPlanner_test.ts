@@ -84,6 +84,27 @@ Deno.test("planMarketEvidenceQueries: a salvaged modelFamilyHint feeds rung 5 wh
   );
 });
 
+Deno.test("planMarketEvidenceQueries: variant without a model is never labeled exact-model-variant", () => {
+  const identity: IdentityCandidate = {
+    ...BASE_IDENTITY, itemName: 'Vintage Radio', brand: 'GE', variant: 'red',
+  };
+  const queries = planMarketEvidenceQueries(identity, ALL_TERMS_CAPS);
+  assert(
+    queries.every((q) => q.precision !== 'exact_model_variant'),
+    `variant-only identity must remain broad: ${JSON.stringify(queries)}`,
+  );
+});
+
+Deno.test("planMarketEvidenceQueries: exact-model-variant never truncates away the variant", () => {
+  const identity: IdentityCandidate = {
+    ...BASE_IDENTITY, itemName: 'GE Superadio III', brand: 'General Electric',
+    model: '7-2887', variant: 'Superadio III',
+  };
+  const queries = planMarketEvidenceQueries(identity, ALL_TERMS_CAPS);
+  const exact = queries.find((q) => q.precision === 'exact_model_variant');
+  assertEquals(exact?.query, '7 2887 superadio iii');
+});
+
 Deno.test("planMarketEvidenceQueries: a search_keyword that normalizes to the same text as an earlier rung is dropped, keeping the earlier (higher-precision) one", () => {
   const identity: IdentityCandidate = {
     ...BASE_IDENTITY, itemName: 'GE Radio', brand: 'GE', model: '7-2880',
