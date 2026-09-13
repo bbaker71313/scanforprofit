@@ -18,7 +18,42 @@ import type { SoldMarketDataProvider, SoldCompsQuery, SoldEvidenceResult } from 
 import { externalCall, ExternalCallError } from "./externalCall.ts"
 
 const SERP_API_BASE_URL = 'https://serpapi.com/search.json';
-const REQUEST_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 10_000;
+const RESULT_WAIT_MS = 40_000;
+const RESULT_POLL_MS = 1_000;
+
+function searchStatus(data: Record<string, unknown>): string | null {
+  const value = (data.search_metadata as Record<string, unknown> | undefined)?.status;
+  return typeof value === 'string' ? value : null;
+}
+
+async function waitForSearchResult(
+  submitted: Record<string, unknown>,
+  apiKey: string,
+): Promise<Record<string, unknown> | SoldEvidenceResult> {
+  let data = submitted;
+  let status = searchStatus(data);
+  if (status !== 'Queued' && status !== 'Processing') return data;
+
+  const id = (data.search_metadata as Record<string, unknown> | undefined)?.id;
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+    return { ok: false, reason: 'MALFORMED_PROVIDER_RESPONSE', detail: 'SerpAPI async search did not return a valid search id' };
+  }
+
+  const deadline = Date.now() + RESULT_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, RESULT_POLL_MS));
+    data = await externalCall<Record<string, unknown>>(
+      `https://serpapi.com/searches/${id}.json?api_key=${encodeURIComponent(apiKey)}`,
+      { method: 'GET' },
+      { timeoutMs: REQUEST_TIMEOUT_MS, maxRetries: 0, isIdempotent: true },
+      (res) => res.json() as Promise<Record<string, unknown>>,
+    );
+    status = searchStatus(data);
+    if (status !== 'Queued' && status !== 'Processing') return data;
+  }
+  return { ok: false, reason: 'PROVIDER_TIMEOUT', detail: `SerpAPI eBay sold search did not finish within ${RESULT_WAIT_MS}ms` };
+}
 
 function numLike(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
@@ -160,19 +195,18 @@ export class SerpApiEbaySoldProvider implements SoldMarketDataProvider {
       engine: 'ebay',
       _nkw: query.searchTerms,
       show_only: 'Sold',    // verified sold items only — NOT "Complete" (includes unsold)
+      async: 'true',        // submit quickly, then poll Search Archive below
       api_key: this.apiKey,
       // No no_cache=true: SerpAPI's default caching is acceptable for sold data
       // and reduces cost (cached results are free).
     });
 
     try {
-      const data = await externalCall<Record<string, unknown>>(
+      const submitted = await externalCall<Record<string, unknown>>(
         `${SERP_API_BASE_URL}?${qs.toString()}`,
         { method: 'GET' },
         {
           timeoutMs: REQUEST_TIMEOUT_MS,
-          // Give one live eBay-engine search enough time to finish instead
-          // of aborting and repeating the same paid request.
           maxRetries: 0,
           isIdempotent: true,
           shouldRetry: (error, retryAfterMs) => {
@@ -186,9 +220,13 @@ export class SerpApiEbaySoldProvider implements SoldMarketDataProvider {
         (res) => res.json() as Promise<Record<string, unknown>>,
       );
 
-      const searchStatus = (data.search_metadata as Record<string, unknown> | undefined)?.status;
-      if (searchStatus !== 'Success') {
-        const errorDetail = str(data.error) ?? `SerpAPI reported status: ${String(searchStatus ?? 'unknown')}`;
+      const awaited = await waitForSearchResult(submitted, this.apiKey);
+      if ((awaited as { ok?: unknown }).ok === false) return awaited as SoldEvidenceResult;
+      const data = awaited as Record<string, unknown>;
+
+      const finalStatus = searchStatus(data);
+      if (finalStatus !== 'Success') {
+        const errorDetail = str(data.error) ?? `SerpAPI reported status: ${String(finalStatus ?? 'unknown')}`;
         if (typeof data.error === 'string' && data.error.toLowerCase().includes('quota')) {
           return { ok: false, reason: 'PROVIDER_QUOTA_EXHAUSTED', detail: data.error };
         }

@@ -169,6 +169,25 @@ Deno.test("SerpApiEbaySoldProvider: successful response returns comps", async ()
   } finally { globalThis.fetch = originalFetch; }
 });
 
+Deno.test("SerpApiEbaySoldProvider: async search polls the archive until results succeed", async () => {
+  let calls = 0;
+  globalThis.fetch = (() => {
+    calls++;
+    if (calls === 1) {
+      return Promise.resolve(new Response(JSON.stringify({
+        search_metadata: { id: "search_123", status: "Processing" },
+      }), { status: 200 }));
+    }
+    return Promise.resolve(serpSuccess([VALID_ITEM]));
+  }) as typeof fetch;
+  try {
+    const result = await serpProvider().searchSoldComps({ searchTerms: "ge superadio" });
+    if (!result.ok) throw new Error(`expected ok, got ${JSON.stringify(result)}`);
+    assertEquals(result.comps.length, 1);
+    assertEquals(calls, 2);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 Deno.test("SerpApiEbaySoldProvider: empty organic_results returns ok with zero comps", async () => {
   globalThis.fetch = (() => Promise.resolve(serpSuccess([]))) as typeof fetch;
   try {
