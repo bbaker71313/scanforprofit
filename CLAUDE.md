@@ -55,9 +55,22 @@ Read these files in order before doing anything:
 
 docs/CURRENT_STATE.md — authoritative "what exists now"
 docs/HANDOFF.md — what changed last session, current state
-docs/FEATURE_TRIAGE.md — what to port vs build vs defer
 
-Do NOT create duplicate files. Do NOT recreate files that already exist — update them. Update docs/HANDOFF.md after every github commit
+Read `docs/FEATURE_TRIAGE.md` only when the task concerns feature scope,
+port/build/defer status, or roadmap prioritization. Read
+`docs/files/DECISIONS.md` only when the task reaches a protected product or
+technical decision. Do not preload either file for unrelated tasks.
+
+Context-budget rule: inspect large implementation files with targeted search
+and bounded line ranges first. Do not dump all of `apps/web/public/app.html`,
+`supabase/functions/claude-proxy/index.ts`, or historical documentation into
+the conversation. Expand only around relevant symbols and call paths.
+
+`docs/HANDOFF.md` contains current handoff state only. Keep at most the three
+most recent sessions and no more than 250 lines. Git history is the archive;
+do not append an unbounded session history back into this file.
+
+Do NOT create duplicate files. Do NOT recreate files that already exist — update them. Update docs/HANDOFF.md after every GitHub commit, then remove entries older than the three most recent sessions and enforce the 250-line limit.
 
 
 SESSION START — MANDATORY VERIFICATION (do not skip, do not reorder)
@@ -220,7 +233,11 @@ scanforprofit/
 
 └── CLAUDE.md                      # This file
 
-Hard rule: No file may exceed 500 lines. Refactor into sub-modules before hitting that limit.
+New source modules should stay under 500 lines. The legacy live files
+`apps/web/public/app.html` and `supabase/functions/claude-proxy/index.ts` are
+known exceptions; do not launch an unrelated refactor merely because they
+already exceed the limit. Extract a focused module when the current task
+materially changes one of those areas and the extraction is safe and in scope.
 
 
 💻 Tech Stack
@@ -449,8 +466,9 @@ Never hit live Supabase or Stripe in tests — always mock.
 ✅ Session Protocol
 Start of every session:
 Read docs/CURRENT_STATE.md — authoritative "what exists now"
-Read docs/HANDOFF.md — last 2 sessions only; skip older entries
-Read docs/FEATURE_TRIAGE.md — check port vs build vs defer
+Read docs/HANDOFF.md — current handoff; this file is capped at 3 sessions/250 lines
+Read docs/FEATURE_TRIAGE.md only when the task concerns feature scope or an AI
+feature whose approved prompt must be ported from that file
 Read this file — done when you reach this line
 Run SESSION START verification above — all 5 checks must pass
 During work — Karpathy Rules (all 4, always):
@@ -529,7 +547,7 @@ Using StyleSheet in React Native — NativeWind classes only
 Using <form> tags — use onClick/onChange handlers
 Floating point currency math — use precise arithmetic, store as numbers
 Storing dates without timezone — always UTC ISO 8601
-Files over 500 lines — refactor proactively
+Allowing new source modules past 500 lines; legacy monoliths are scoped exceptions
 Duplicating types — all types in packages/shared/src/types/index.ts only
 
 
