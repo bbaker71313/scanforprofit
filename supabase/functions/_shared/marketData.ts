@@ -189,6 +189,7 @@ export type MarketDataFailureReason =
 // with pagination/retries can't balloon the persisted row; never logs
 // provider credentials or raw response bodies.
 export interface MarketEvidenceAuditEntry {
+  providerId?: string
   query: string
   precision: CompMatchPrecision
   rawCompCount: number
@@ -228,6 +229,7 @@ export interface MarketDataSuccess {
   identity: IdentityCandidate
   catalogMatch: CatalogMatch | null
   category: CategoryResolution | null
+  soldProviderId?: string | null
   metrics: MarketMetrics
   audit?: MarketEvidenceAudit
 }

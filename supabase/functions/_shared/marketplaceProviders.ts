@@ -1,5 +1,5 @@
 // Marketplace evidence providers (task doc §8-9). eBay is wired to the real,
-// live-verified pipeline (marketDataPipeline.ts — Trawl/SoldComps sold
+// live-verified pipeline (marketDataPipeline.ts — SerpAPI/SoldComps/Trawl sold
 // evidence + eBay Browse active evidence). Every other marketplace is a
 // provider-boundary placeholder: no supported API integration is
 // implemented for Etsy/Reverb/Discogs/Amazon/Mercari/Poshmark yet (no
@@ -92,7 +92,9 @@ export function mapEbayResultToEvidence(result: MarketDataResult): MarketplaceEv
       priceLow, priceHigh, expectedSalePrice,
       matchPrecision: result.metrics.compMatchPrecision,
       evidenceQuality: stats.evidenceQuality,
-      sourceName: stats.compCount > 0 ? 'eBay sold listings + active market data' : 'eBay active market data',
+      sourceName: stats.compCount > 0
+        ? `eBay sold listings (${result.soldProviderId ?? 'provider'})${active ? ' + active market data' : ''}`
+        : 'eBay active market data',
       fetchedAt: new Date().toISOString(),
     },
     audit: result.audit,

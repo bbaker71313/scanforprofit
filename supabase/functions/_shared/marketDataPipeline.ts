@@ -124,8 +124,15 @@ export async function resolveVerifiedMarketData(
   // query, and — independently — the best PARTIAL result (1-2 real comps)
   // seen along the way, kept only as a fallback for the 'moderate with
   // active support' evidence tier if nothing fully qualifies.
-  let qualified: { query: string; precision: CompMatchPrecision; comps: SoldCompListing[] } | null = null;
-  let partial: { query: string; precision: CompMatchPrecision; comps: SoldCompListing[] } | null = null;
+  type SelectedSoldEvidence = {
+    query: string
+    precision: CompMatchPrecision
+    comps: SoldCompListing[]
+    providerId: string
+    suppliesBestOfferFlag: boolean
+  };
+  let qualified: SelectedSoldEvidence | null = null;
+  let partial: SelectedSoldEvidence | null = null;
   // §6.3/§6.4: a genuine operational failure (provider outage/rate-limit/
   // malformed response) encountered mid-cascade. Recorded, not fatal —
   // evidence already collected (this query's own comps if any, plus
@@ -140,16 +147,23 @@ export async function resolveVerifiedMarketData(
       const requestStartedAt = Date.now();
       const soldResult = await soldProvider.searchSoldComps({ searchTerms: candidate.query });
       const providerLatencyMs = Date.now() - requestStartedAt;
-      if (!soldResult.ok) {
+      const providerAttempts = soldResult.providerAttempts ?? [{
+        providerId: soldResult.providerId ?? soldProvider.providerId,
+        ok: soldResult.ok,
+        reason: soldResult.ok ? null : soldResult.reason,
+        detail: soldResult.ok ? null : soldResult.detail,
+        latencyMs: providerLatencyMs,
+      }];
+      for (const attempt of providerAttempts.filter((entry) => !entry.ok)) {
         attemptedQueries.push({
+          providerId: attempt.providerId,
           query: candidate.query, precision: candidate.precision,
           rawCompCount: 0, retainedCompCount: 0, excludedComps: [], excludedOverflowCount: 0,
-          qualified: false, rejectionReason: `${soldResult.reason}: ${soldResult.detail}`,
-          providerLatencyMs,
-          // Always 0 until the Retry-After retry policy (decision B) is
-          // implemented — this call was not retried.
-          retryCount: 0,
+          qualified: false, rejectionReason: `${attempt.reason}: ${attempt.detail}`,
+          providerLatencyMs: attempt.latencyMs, retryCount: 0,
         });
+      }
+      if (!soldResult.ok) {
         // A provider outage/rate-limit/malformed response is not evidence
         // that a broader query is needed — stop the cascade rather than
         // multiplying failed calls. §6.3: unlike before, this no longer
@@ -177,19 +191,25 @@ export async function resolveVerifiedMarketData(
         : outlierResult.failed ? 'retained prices failed the outlier/coherence guard'
         : 'retained prices failed the p20/p80 coherence guard';
       attemptedQueries.push({
+        providerId: soldResult.providerId ?? soldProvider.providerId,
         query: candidate.query, precision: candidate.precision,
         rawCompCount: soldResult.comps.length, retainedCompCount: stats.compCount,
         ...capExcluded(allExcluded), qualified: fullyQualifies, rejectionReason,
-        providerLatencyMs, retryCount: 0,
+        providerLatencyMs: providerAttempts.find((entry) => entry.ok)?.latencyMs ?? providerLatencyMs,
+        retryCount: 0,
       });
+      const selectedProvider = {
+        providerId: soldResult.providerId ?? soldProvider.providerId,
+        suppliesBestOfferFlag: soldResult.suppliesBestOfferFlag ?? soldProvider.capabilities.suppliesBestOfferFlag,
+      };
       if (fullyQualifies) {
-        qualified = { query: candidate.query, precision: candidate.precision, comps: retainedForStats };
+        qualified = { query: candidate.query, precision: candidate.precision, comps: retainedForStats, ...selectedProvider };
         break;
       }
       // Track the best partial (1-2 usable comps) across the cascade —
       // never used alone, only as support alongside active evidence.
       if (stats.compCount >= 1 && stats.compCount <= 2 && (!partial || stats.compCount > partial.comps.length)) {
-        partial = { query: candidate.query, precision: candidate.precision, comps: retainedForStats };
+        partial = { query: candidate.query, precision: candidate.precision, comps: retainedForStats, ...selectedProvider };
       }
     }
   }
@@ -285,7 +305,7 @@ export async function resolveVerifiedMarketData(
   // A provider that cannot distinguish accepted Best Offers cannot prove the
   // displayed amount was the final transaction price. It may support LIST,
   // but cannot independently earn the strong-evidence/HOT tier.
-  if (evidenceQuality === 'strong' && soldProvider?.capabilities.suppliesBestOfferFlag === false) {
+  if (evidenceQuality === 'strong' && selected?.suppliesBestOfferFlag === false) {
     evidenceQuality = 'moderate';
   }
 
@@ -309,7 +329,7 @@ export async function resolveVerifiedMarketData(
     if (!soldProvider) {
       return {
         ok: false, reason: 'SOLDCOMPS_NOT_CONFIGURED',
-        detail: 'No sold-comp provider is configured (SERP_API_KEY/SOLD_COMPS_API_KEY absent) — active-market-only evidence did not reach a decisive tier.',
+        detail: 'No sold-comp provider is configured (SERP_API_KEY/SOLD_COMPS_API_KEY/TRAWL_API_KEY absent) — active-market-only evidence did not reach a decisive tier.',
         audit: { attemptedQueries, selectedQuery: selected?.query ?? null, activeSample },
       };
     }
@@ -360,7 +380,7 @@ export async function resolveVerifiedMarketData(
   };
 
   return {
-    ok: true, identity, catalogMatch, category, metrics,
+    ok: true, identity, catalogMatch, category, soldProviderId: selected?.providerId ?? null, metrics,
     audit: { selectedQuery: queryForActive, attemptedQueries, activeSample },
   };
 }
