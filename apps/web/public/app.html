@@ -6003,7 +6003,7 @@ async function stitchPhotos(files) {
 // malformed identically as "unknown" and never conflates that with a typed 0.
 async function scanFetch(url, options) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
   try {
     return await apiFetch(url, {...options, signal: controller.signal});
   } catch (error) {
@@ -6229,6 +6229,8 @@ function renderAlternativeMarketplaces(alts) {
 // in claude-proxy/index.ts and VALID_UNAVAILABLE_REASONS in
 // scanResultContract.js exactly.
 const UNAVAILABLE_REASON_COPY = {
+  PROVIDER_TIMEOUT: 'Market data took too long to respond. Try again shortly.',
+  MALFORMED_PROVIDER_RESPONSE: 'Market data returned an invalid response. Try again shortly.',
   PROVIDER_THROTTLED: 'Market data is busy right now. Try again in a few seconds.',
   PROVIDER_QUOTA_EXHAUSTED: "Market data is unavailable today. We're on it.",
   PROVIDER_UNAVAILABLE: 'Market data is temporarily unavailable. Try again shortly.',

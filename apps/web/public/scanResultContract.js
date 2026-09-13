@@ -47,6 +47,7 @@
   // "try again shortly" (transient) apart from "no comps" (a real data gap),
   // instead of one identical LIMITED EVIDENCE sentence for every cause.
   var VALID_UNAVAILABLE_REASONS = [
+    'PROVIDER_TIMEOUT', 'MALFORMED_PROVIDER_RESPONSE',
     'PROVIDER_THROTTLED', 'PROVIDER_QUOTA_EXHAUSTED', 'PROVIDER_UNAVAILABLE',
     'PROVIDER_NOT_CONFIGURED', 'IDENTIFICATION_UNRESOLVED', 'NO_MARKET_EVIDENCE',
     'EVIDENCE_TOO_WEAK', 'MARKETPLACE_AUTH_FAILED',

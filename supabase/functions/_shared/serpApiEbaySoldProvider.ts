@@ -11,14 +11,14 @@
 // verified_transaction evidence unless it carries an unsold_date field
 // (explicit signal that the listing ended without a buyer). A missing
 // sold_date is not a rejection reason — eBay's own sold-filter guarantees
-// the item sold; we fall back to today's date for display/audit purposes only.
+// the item sold; an unknown date is kept outside recent-velocity metrics.
 import type { SoldCompListing, MarketDataFailureReason } from "./marketData.ts"
 import type { MarketEvidenceProviderCapabilities } from "./marketplaceTypes.ts"
 import type { SoldMarketDataProvider, SoldCompsQuery, SoldEvidenceResult } from "./soldCompsProvider.ts"
 import { externalCall, ExternalCallError } from "./externalCall.ts"
 
 const SERP_API_BASE_URL = 'https://serpapi.com/search.json';
-const REQUEST_TIMEOUT_MS = 12_000;
+const REQUEST_TIMEOUT_MS = 30_000;
 
 function numLike(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
@@ -171,7 +171,9 @@ export class SerpApiEbaySoldProvider implements SoldMarketDataProvider {
         { method: 'GET' },
         {
           timeoutMs: REQUEST_TIMEOUT_MS,
-          maxRetries: 1,
+          // Give one live eBay-engine search enough time to finish instead
+          // of aborting and repeating the same paid request.
+          maxRetries: 0,
           isIdempotent: true,
           shouldRetry: (error, retryAfterMs) => {
             if (error.kind === 'http') {

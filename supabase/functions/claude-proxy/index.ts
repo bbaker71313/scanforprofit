@@ -275,6 +275,8 @@ export interface AlternativeMarketplace {
 // cases. The server never sends the underlying provider `detail` string to
 // the client; that stays in scan_log only.
 export type ScanUnavailableReason =
+  | 'PROVIDER_TIMEOUT'          // provider exceeded its bounded deadline
+  | 'MALFORMED_PROVIDER_RESPONSE' // provider contract changed/broke
   | 'PROVIDER_THROTTLED'        // retryable; try again shortly
   | 'PROVIDER_QUOTA_EXHAUSTED'  // monthly allowance spent
   | 'PROVIDER_UNAVAILABLE'      // outage / malformed response
@@ -306,10 +308,10 @@ function isGenuineMarketGapReason(reason: ScanUnavailableReason): reason is 'NO_
 const UNAVAILABLE_REASON_MAP: Record<ProviderFailureReason, ScanUnavailableReason> = {
   NOT_CONFIGURED: 'PROVIDER_NOT_CONFIGURED',
   PROVIDER_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
-  PROVIDER_TIMEOUT: 'PROVIDER_UNAVAILABLE',
+  PROVIDER_TIMEOUT: 'PROVIDER_TIMEOUT',
   PROVIDER_THROTTLED: 'PROVIDER_THROTTLED',
   PROVIDER_QUOTA_EXHAUSTED: 'PROVIDER_QUOTA_EXHAUSTED',
-  MALFORMED_PROVIDER_RESPONSE: 'PROVIDER_UNAVAILABLE',
+  MALFORMED_PROVIDER_RESPONSE: 'MALFORMED_PROVIDER_RESPONSE',
   IDENTIFICATION_UNRESOLVED: 'IDENTIFICATION_UNRESOLVED',
   INSUFFICIENT_VERIFIED_MARKET_DATA: 'NO_MARKET_EVIDENCE',
   EVIDENCE_TOO_WEAK: 'EVIDENCE_TOO_WEAK',
@@ -823,7 +825,7 @@ async function handleTextScan(
   text: string,
   acquisitionCost: number | null = null,
 ) {
-  const userText = `Identify and price this specific item for eBay resale: "${text.slice(0, 300)}". Provide realistic eBay sold comps — not retail or asking prices.`;
+  const userText = `Identify this specific item for marketplace resale: "${text.slice(0, 300)}". Return identification and condition fields only. Do not claim to have searched sold listings and do not provide any price, sold-comp, demand, profit, ROI, or days-to-sell information.`;
   const raw = await callAnthropic(anthropicKey, buildSinglePrompt(settings), [], 1024, [], userText);
   let ai: Record<string, unknown>;
   try { ai = JSON.parse(raw); }
