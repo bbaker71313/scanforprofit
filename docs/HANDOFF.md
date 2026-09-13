@@ -4,6 +4,66 @@ This file is the persistent session context. Update it at the end of every Claud
 
 ---
 
+## Session: 2026-09-13 — Recovery: verify v112 deployment state and scoring fix
+
+**Summary:** Previous session errored before making any changes. This session
+confirmed the deployed state is current and the comp-matching + SerpAPI
+sold-provider fixes are live and correct.
+
+**Deployment state confirmed (via `mcp__Supabase__list_edge_functions` +
+`mcp__Supabase__get_edge_function` bundle grep):**
+- `claude-proxy` is at **v112**, `ACTIVE`, deployed **2026-09-11**. This version
+  was deployed by the product owner after PR #158 merged — it is current with
+  `main` HEAD (`83380d1`).
+- Bundle contains: `SerpApiEbaySoldProvider`, `getSoldMarketDataProvider` (SerpAPI
+  factory), `extractProductType` (comp-matching fix), `identifyViaSerpApi`/
+  `mergeSerpApiIdentity` (R3 SerpAPI identification). All expected markers present.
+  `TrawlProvider` present as deprecated rollback class (expected).
+- All other functions (auth v80, stripe-webhook v75, stripe-checkout v79,
+  ebay-oauth v86, export-reminder v53, cron v18) remain ACTIVE and unchanged.
+
+**Scan id=72 analysis (the GE radio test scan, 2026-09-11 11:51:17):**
+- This scan ran on the **old code** (v109, before the fix was deployed). Result:
+  0 retained comps across both qualifying queries; `PROVIDER_THROTTLED` on the
+  3rd query. This is the known pre-fix regression, not a post-fix failure.
+
+**Scoring fix verified by source inspection (`compSelection.ts` v112):**
+- `extractProductType("General Electric All Transistor AM Radio Vintage 1960s
+  Table Top")` → returns `"radio"` (skips "top", "table", "1960s" right-to-left).
+- Comp "Vintage General Electric GE P-808A All Transistor AM Radio White Working"
+  scores: brand +25 + head noun +15 + descriptive tokens ("all","transistor") +20
+  = **60 → usable band**. Per R3: `score >= USABLE_BAND_MIN (60)` → retained.
+- Many of the 20 query-1 comps and 138 query-2 comps will now score ≥ 60 with
+  v112, so a fresh GE radio scan should achieve Case A (≥3 retained comps).
+
+**`DEPLOYED.md` note:** The product owner deployed v112 outside the recorded
+script (same pattern as R2/R3), so `DEPLOYED.md` still shows R3 as the last
+recorded entry. The live version (v112) is current; no re-deploy is needed.
+
+**Files changed this session:** `docs/HANDOFF.md` only (this update).
+
+**Commits this session:** see below.
+
+**Next task:** Run a live production scan of the GE radio (the same scan that
+produced scan_log id=72) and inspect `scan_log.raw_response.decisionAudit` to
+verify retained comp counts. Expected outcome: Case A (≥3 retained comps on
+rung 1 or 2, resulting in `decisionAvailable: true` with a HOT/LIST/SKIP). If
+Case B or C, report the actual `rejectionReason` and `retainedCompCount` from
+the decisionAudit for each attempted query.
+
+**No code changes needed.** v112 is deployed and correct.
+
+**Assumptions made:** None material — every claim above is evidence-based
+(live function list, bundle grep, source inspection, scan_log query).
+
+**Out-of-scope findings:** None.
+
+**Blockers:** Cannot run a live production scan from a remote session (egress
+proxy blocks direct calls to `*.supabase.co`). The product owner must run the
+verification scan from `scanforprofit.com/app.html`.
+
+---
+
 ## Session: 2026-09-11 — SerpAPI replaces Trawl as primary eBay sold-history provider
 
 **Summary:** Replaced Trawl with SerpAPI (`engine=ebay&show_only=Sold`) as the primary eBay sold-data provider per executive directive. `SERP_API_KEY` (already configured in Supabase for Google Lens identification) is now reused for sold searches — no new credential needed.
